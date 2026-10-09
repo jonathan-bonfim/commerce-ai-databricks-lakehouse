@@ -1,0 +1,24 @@
+# Raw datasets
+data/
+*.csv
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local environment
+.env
+.venv/
+venv/
+
+# Databricks local files
+.databricks/
