@@ -3021,3 +3021,437 @@ if not persisted_product_validation_passed:
     )
 
 print("Persisted Silver Products validation: PASS")
+
+# COMMAND ----------
+
+# DBTITLE 1,35 - Transform Product Category Translation
+# Register source and target tables
+SOURCE_TABLES["product_category_translation"] = (
+    f"{CATALOG}.{BRONZE_SCHEMA}.br_product_category_translation"
+)
+
+TARGET_TABLES["product_category_translation"] = (
+    f"{CATALOG}.{SILVER_SCHEMA}.sl_product_category_translation"
+)
+
+# Define expected columns
+TRANSLATION_COLUMNS = [
+    "product_category_name",
+    "product_category_name_english"
+]
+
+# Read Bronze source
+bronze_translation = spark.table(
+    SOURCE_TABLES["product_category_translation"]
+)
+
+# Validate source contract
+expected_columns = set(
+    TRANSLATION_COLUMNS + METADATA_COLUMNS
+)
+
+missing_columns = sorted(
+    expected_columns - set(bronze_translation.columns)
+)
+
+if missing_columns:
+    raise ValueError(
+        f"Missing translation columns: {missing_columns}"
+    )
+
+# Define reusable category normalization
+def normalize_category_value(column):
+    normalized = F.lower(
+        F.trim(column.cast("string"))
+    )
+
+    return (
+        F.when(
+            normalized == "",
+            F.lit(None).cast("string")
+        )
+        .otherwise(normalized)
+    )
+
+
+# Apply Silver transformations
+silver_translation = bronze_translation.select(
+
+    normalize_category_value(
+        F.col("product_category_name")
+    ).alias("product_category_name"),
+
+    normalize_category_value(
+        F.col("product_category_name_english")
+    ).alias("product_category_name_english"),
+
+    *[
+        F.col(column_name)
+        for column_name in METADATA_COLUMNS
+    ]
+)
+
+print("Silver Category Translation configured.")
+
+silver_translation.printSchema()
+
+display(silver_translation.limit(10))
+
+# COMMAND ----------
+
+# DBTITLE 1,36 - Validate Category Translation Keys
+# Reconcile source and target counts
+bronze_translation_count = bronze_translation.count()
+silver_translation_count = silver_translation.count()
+
+# Validate category keys and values
+translation_metrics = silver_translation.agg(
+
+    F.countDistinct(
+        "product_category_name"
+    ).alias("distinct_category_keys"),
+
+    F.sum(
+        F.when(
+            F.col("product_category_name").isNull(),
+            1
+        ).otherwise(0)
+    ).alias("invalid_category_keys"),
+
+    F.sum(
+        F.when(
+            F.col("product_category_name_english").isNull(),
+            1
+        ).otherwise(0)
+    ).alias("missing_english_translations")
+
+).first().asDict()
+
+# Identify duplicate keys after normalization
+duplicate_category_keys = (
+    silver_translation
+    .groupBy("product_category_name")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+# Validate output types
+translation_types_valid = all(
+    silver_translation.schema[column_name]
+        .dataType.simpleString() == "string"
+    for column_name in TRANSLATION_COLUMNS
+)
+
+# Build validation results
+translation_validation = {
+    "bronze_count": bronze_translation_count,
+    "silver_count": silver_translation_count,
+    "distinct_category_keys": translation_metrics[
+        "distinct_category_keys"
+    ],
+    "duplicate_key_groups": duplicate_category_keys,
+    "invalid_category_keys": translation_metrics[
+        "invalid_category_keys"
+    ],
+    "missing_english_translations": translation_metrics[
+        "missing_english_translations"
+    ],
+    "translation_types_valid": translation_types_valid
+}
+
+translation_validation_passed = (
+    bronze_translation_count == silver_translation_count
+    and silver_translation_count
+        == translation_metrics["distinct_category_keys"]
+    and duplicate_category_keys == 0
+    and translation_metrics["invalid_category_keys"] == 0
+    and translation_metrics[
+        "missing_english_translations"
+    ] == 0
+    and translation_types_valid
+)
+
+translation_validation["status"] = (
+    "PASS" if translation_validation_passed else "FAIL"
+)
+
+display(
+    spark.createDataFrame([translation_validation])
+)
+
+if not translation_validation_passed:
+    raise ValueError(
+        "Category Translation validation failed."
+    )
+
+print("All Category Translation key validations passed.")
+
+# COMMAND ----------
+
+# DBTITLE 1,37 - Validate Product Category Mapping Coverage
+# Load Silver Products
+products_reference = spark.table(
+    f"{CATALOG}.{SILVER_SCHEMA}.sl_products"
+)
+
+# Identify products with missing categories
+products_without_category = (
+    products_reference
+    .filter(
+        F.col("product_category_name").isNull()
+    )
+    .count()
+)
+
+# Select products with known categories
+valid_product_categories = (
+    products_reference
+    .filter(
+        F.col("product_category_name").isNotNull()
+    )
+    .select(
+        "product_id",
+        "product_category_name"
+    )
+)
+
+# Prepare Silver translation keys
+silver_translation_keys = (
+    silver_translation
+    .select("product_category_name")
+    .distinct()
+)
+
+# Prepare normalized Bronze translation keys
+bronze_translation_keys = (
+    bronze_translation
+    .select(
+        normalize_category_value(
+            F.col("product_category_name")
+        ).alias("product_category_name")
+    )
+    .distinct()
+)
+
+# Find products without Silver translation
+unmatched_silver_products = (
+    valid_product_categories
+    .join(
+        silver_translation_keys,
+        on="product_category_name",
+        how="left_anti"
+    )
+)
+
+# Find products without Bronze translation
+unmatched_bronze_products = (
+    valid_product_categories
+    .join(
+        bronze_translation_keys,
+        on="product_category_name",
+        how="left_anti"
+    )
+)
+
+# Count unmatched product records
+unmatched_silver_count = unmatched_silver_products.count()
+unmatched_bronze_count = unmatched_bronze_products.count()
+
+# Count distinct categories without translation
+unmatched_category_count = (
+    unmatched_silver_products
+    .select("product_category_name")
+    .distinct()
+    .count()
+)
+
+# Check unused translation categories
+unused_translation_categories = (
+    silver_translation_keys
+    .join(
+        valid_product_categories
+            .select("product_category_name")
+            .distinct(),
+        on="product_category_name",
+        how="left_anti"
+    )
+    .count()
+)
+
+# Build coverage assessment
+category_coverage = {
+    "total_products": products_reference.count(),
+    "products_without_category": products_without_category,
+    "unmatched_bronze_products": unmatched_bronze_count,
+    "unmatched_silver_products": unmatched_silver_count,
+    "unmatched_category_count": unmatched_category_count,
+    "unused_translation_categories": unused_translation_categories
+}
+
+display(
+    spark.createDataFrame([category_coverage])
+)
+
+print("Categories without English translation:")
+
+display(
+    unmatched_silver_products
+    .groupBy("product_category_name")
+    .count()
+    .orderBy(F.desc("count"))
+)
+
+# Validate that Silver preserved source coverage
+category_coverage_passed = (
+    unmatched_silver_count == unmatched_bronze_count
+)
+
+print(
+    "Category mapping coverage validation: "
+    + ("PASS" if category_coverage_passed else "FAIL")
+)
+
+if not category_coverage_passed:
+    raise ValueError(
+        "Category mapping coverage changed unexpectedly."
+    )
+
+# COMMAND ----------
+
+# DBTITLE 1,38 - Write Silver Product Category Translation
+# Validate required gates before writing
+if not translation_validation_passed:
+    raise ValueError(
+        "Category Translation structural validation failed."
+    )
+
+if not category_coverage_passed:
+    raise ValueError(
+        "Category Translation coverage validation failed."
+    )
+
+target_table = TARGET_TABLES[
+    "product_category_translation"
+]
+
+# Write Silver reference table
+(
+    silver_translation.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(target_table)
+)
+
+print(f"Successfully written: {target_table}")
+
+# COMMAND ----------
+
+# DBTITLE 1,39 - Validate Persisted Product Category Translation
+# Read persisted Silver translation
+persisted_translation = spark.table(
+    TARGET_TABLES["product_category_translation"]
+)
+
+# Validate persisted rows and keys
+persisted_translation_metrics = (
+    persisted_translation
+    .agg(
+        F.count("*").alias("persisted_count"),
+
+        F.countDistinct(
+            "product_category_name"
+        ).alias("distinct_category_keys"),
+
+        F.sum(
+            F.when(
+                F.col("product_category_name").isNull(),
+                1
+            ).otherwise(0)
+        ).alias("invalid_category_keys")
+    )
+    .first()
+    .asDict()
+)
+
+# Compare expected and persisted records
+expected_translation = silver_translation.select(
+    *silver_translation.columns
+)
+
+actual_translation = persisted_translation.select(
+    *silver_translation.columns
+)
+
+missing_from_target = (
+    expected_translation
+    .exceptAll(actual_translation)
+    .count()
+)
+
+unexpected_in_target = (
+    actual_translation
+    .exceptAll(expected_translation)
+    .count()
+)
+
+# Validate category coverage after persistence
+persisted_translation_keys = (
+    persisted_translation
+    .select("product_category_name")
+    .distinct()
+)
+
+persisted_unmatched_products = (
+    valid_product_categories
+    .join(
+        persisted_translation_keys,
+        on="product_category_name",
+        how="left_anti"
+    )
+    .count()
+)
+
+# Validate final result
+persisted_translation_passed = (
+    translation_validation_passed
+    and category_coverage_passed
+    and persisted_translation_metrics["persisted_count"]
+        == bronze_translation_count
+    and persisted_translation_metrics["distinct_category_keys"]
+        == bronze_translation_count
+    and persisted_translation_metrics["invalid_category_keys"] == 0
+    and persisted_unmatched_products == unmatched_bronze_count
+    and missing_from_target == 0
+    and unexpected_in_target == 0
+)
+
+validation_result = {
+    "source": "product_category_translation",
+    "bronze_count": bronze_translation_count,
+    "persisted_count": persisted_translation_metrics[
+        "persisted_count"
+    ],
+    "distinct_category_keys": persisted_translation_metrics[
+        "distinct_category_keys"
+    ],
+    "unmatched_products": persisted_unmatched_products,
+    "missing_from_target": missing_from_target,
+    "unexpected_in_target": unexpected_in_target,
+    "status": (
+        "PASS"
+        if persisted_translation_passed else "FAIL"
+    )
+}
+
+display(
+    spark.createDataFrame([validation_result])
+)
+
+if not persisted_translation_passed:
+    raise ValueError(
+        "Persisted Category Translation validation failed."
+    )
+
+print("Persisted Category Translation validation: PASS")
