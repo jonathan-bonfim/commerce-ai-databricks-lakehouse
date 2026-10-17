@@ -3455,3 +3455,665 @@ if not persisted_translation_passed:
     )
 
 print("Persisted Category Translation validation: PASS")
+
+# COMMAND ----------
+
+# DBTITLE 1,40 - Transform Reviews
+from pyspark.sql import functions as F
+
+# Register source and target tables
+SOURCE_TABLES["reviews"] = (
+    f"{CATALOG}.{BRONZE_SCHEMA}.br_reviews"
+)
+
+TARGET_TABLES["reviews"] = (
+    f"{CATALOG}.{SILVER_SCHEMA}.sl_reviews"
+)
+
+# Define expected source columns
+REVIEW_COLUMNS = [
+    "review_id",
+    "order_id",
+    "review_score",
+    "review_comment_title",
+    "review_comment_message",
+    "review_creation_date",
+    "review_answer_timestamp"
+]
+
+REVIEW_TIMESTAMP_COLUMNS = [
+    "review_creation_date",
+    "review_answer_timestamp"
+]
+
+# Read validated Bronze source
+bronze_reviews = spark.table(
+    SOURCE_TABLES["reviews"]
+)
+
+# Validate source contract
+missing_columns = sorted(
+    set(REVIEW_COLUMNS + METADATA_COLUMNS)
+    - set(bronze_reviews.columns)
+)
+
+if missing_columns:
+    raise ValueError(
+        f"Missing Review source columns: {missing_columns}"
+    )
+
+# Apply Silver transformations
+silver_reviews = bronze_reviews.select(
+
+    F.col("review_id")
+        .cast("string")
+        .alias("review_id"),
+
+    F.col("order_id")
+        .cast("string")
+        .alias("order_id"),
+
+    F.col("review_score")
+        .cast("int")
+        .alias("review_score"),
+
+    F.col("review_comment_title")
+        .cast("string")
+        .alias("review_comment_title"),
+
+    F.col("review_comment_message")
+        .cast("string")
+        .alias("review_comment_message"),
+
+    *[
+        F.col(column_name)
+            .cast("timestamp")
+            .alias(column_name)
+        for column_name in REVIEW_TIMESTAMP_COLUMNS
+    ],
+
+    *[
+        F.col(column_name)
+        for column_name in METADATA_COLUMNS
+    ]
+)
+
+print("Silver Reviews transformation configured.")
+
+silver_reviews.printSchema()
+
+display(
+    silver_reviews.select(
+        "review_id",
+        "order_id",
+        "review_score",
+        "review_creation_date",
+        "review_answer_timestamp"
+    ).limit(10)
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,41 - Validate Review Keys and Relationships
+# Reconcile source and transformed counts
+bronze_review_count = bronze_reviews.count()
+silver_review_count = silver_reviews.count()
+
+# Validate identifiers and review scores
+review_key_metrics = silver_reviews.agg(
+
+    F.countDistinct(
+        "review_id",
+        "order_id"
+    ).alias("distinct_review_keys"),
+
+    F.sum(
+        F.when(
+            F.col("review_id").isNull()
+            | (F.trim("review_id") == ""),
+            1
+        ).otherwise(0)
+    ).alias("invalid_review_id_rows"),
+
+    F.sum(
+        F.when(
+            F.col("order_id").isNull()
+            | (F.trim("order_id") == ""),
+            1
+        ).otherwise(0)
+    ).alias("invalid_order_id_rows"),
+
+    F.sum(
+        F.when(
+            F.col("review_score").isNull()
+            | ~F.col("review_score").between(1, 5),
+            1
+        ).otherwise(0)
+    ).alias("invalid_review_score_rows"),
+
+    F.sum(
+        F.when(
+            F.col("review_id").isNotNull()
+            & ~F.col("review_id").rlike(
+                r"^[0-9a-fA-F]{32}$"
+            ),
+            1
+        ).otherwise(0)
+    ).alias("invalid_review_id_format_rows"),
+
+    F.sum(
+        F.when(
+            F.col("order_id").isNotNull()
+            & ~F.col("order_id").rlike(
+                r"^[0-9a-fA-F]{32}$"
+            ),
+            1
+        ).otherwise(0)
+    ).alias("invalid_order_id_format_rows")
+
+).first().asDict()
+
+# Validate composite key uniqueness
+duplicate_review_keys = (
+    silver_reviews
+    .groupBy("review_id", "order_id")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+# Validate relationship with Silver Orders
+orders_reference = (
+    spark.table(
+        f"{CATALOG}.{SILVER_SCHEMA}.sl_orders"
+    )
+    .select("order_id")
+    .distinct()
+)
+
+orphan_review_rows = (
+    silver_reviews
+    .select("order_id")
+    .join(
+        orders_reference,
+        on="order_id",
+        how="left_anti"
+    )
+    .count()
+)
+
+# Validate timestamp null preservation
+bronze_timestamp_counts = bronze_reviews.agg(
+    *[
+        F.count(column_name).alias(column_name)
+        for column_name in REVIEW_TIMESTAMP_COLUMNS
+    ]
+).first()
+
+silver_timestamp_counts = silver_reviews.agg(
+    *[
+        F.count(column_name).alias(column_name)
+        for column_name in REVIEW_TIMESTAMP_COLUMNS
+    ]
+).first()
+
+timestamp_null_losses = {
+    column_name: (
+        bronze_timestamp_counts[column_name]
+        - silver_timestamp_counts[column_name]
+    )
+    for column_name in REVIEW_TIMESTAMP_COLUMNS
+}
+
+# Validate Silver data types
+review_types_valid = (
+    silver_reviews.schema["review_score"]
+        .dataType.simpleString() == "int"
+    and
+    all(
+        silver_reviews.schema[column_name]
+            .dataType.simpleString() == "timestamp"
+        for column_name in REVIEW_TIMESTAMP_COLUMNS
+    )
+    and
+    all(
+        silver_reviews.schema[column_name]
+            .dataType.simpleString() == "string"
+        for column_name in [
+            "review_id",
+            "order_id",
+            "review_comment_title",
+            "review_comment_message"
+        ]
+    )
+)
+
+# Build validation result
+review_validation = {
+    "bronze_count": bronze_review_count,
+    "silver_count": silver_review_count,
+    "distinct_review_keys": review_key_metrics[
+        "distinct_review_keys"
+    ],
+    "duplicate_key_groups": duplicate_review_keys,
+    "orphan_review_rows": orphan_review_rows,
+    "timestamp_null_losses": sum(
+        abs(value)
+        for value in timestamp_null_losses.values()
+    ),
+    "review_types_valid": review_types_valid,
+    **{
+        key: value
+        for key, value in review_key_metrics.items()
+        if key != "distinct_review_keys"
+    }
+}
+
+review_validation_passed = (
+    bronze_review_count == silver_review_count
+    and review_key_metrics["distinct_review_keys"]
+        == silver_review_count
+    and duplicate_review_keys == 0
+    and orphan_review_rows == 0
+    and review_types_valid
+    and all(
+        value == 0
+        for value in timestamp_null_losses.values()
+    )
+    and all(
+        value == 0
+        for key, value in review_key_metrics.items()
+        if key != "distinct_review_keys"
+    )
+)
+
+review_validation["status"] = (
+    "PASS" if review_validation_passed else "FAIL"
+)
+
+display(
+    spark.createDataFrame([review_validation])
+)
+
+print("Timestamp null preservation:")
+print(timestamp_null_losses)
+
+if not review_validation_passed:
+    raise ValueError(
+        "Silver Reviews structural validation failed."
+    )
+
+print("All Review key and relationship validations passed.")
+
+# COMMAND ----------
+
+# DBTITLE 1,42A - Audit Review Text Integrity and Cardinality
+# Define columns that must preserve original text
+REVIEW_TEXT_AUDIT_COLUMNS = [
+    "review_id",
+    "order_id",
+    "review_comment_title",
+    "review_comment_message"
+]
+
+# Compare Bronze and Silver text content
+bronze_text = bronze_reviews.select(
+    *REVIEW_TEXT_AUDIT_COLUMNS
+)
+
+silver_text = silver_reviews.select(
+    *REVIEW_TEXT_AUDIT_COLUMNS
+)
+
+text_missing_from_silver = (
+    bronze_text
+    .exceptAll(silver_text)
+    .count()
+)
+
+text_unexpected_in_silver = (
+    silver_text
+    .exceptAll(bronze_text)
+    .count()
+)
+
+# Profile text characteristics
+text_quality_metrics = silver_reviews.agg(
+
+    F.sum(
+        F.when(
+            F.col("review_comment_message").isNull(),
+            1
+        ).otherwise(0)
+    ).alias("null_comment_messages"),
+
+    F.sum(
+        F.when(
+            F.col("review_comment_title").isNull(),
+            1
+        ).otherwise(0)
+    ).alias("null_comment_titles"),
+
+    F.sum(
+        F.when(
+            F.col("review_comment_message").rlike(
+                r"[\r\n]"
+            ),
+            1
+        ).otherwise(0)
+    ).alias("multiline_comment_rows"),
+
+    F.sum(
+        F.when(
+            F.instr(
+                F.col("review_comment_message"),
+                '"'
+            ) > 0,
+            1
+        ).otherwise(0)
+    ).alias("comments_containing_quotes")
+
+).first().asDict()
+
+print("Review text integrity:")
+
+text_integrity_result = {
+    "missing_from_silver": text_missing_from_silver,
+    "unexpected_in_silver": text_unexpected_in_silver,
+    **text_quality_metrics
+}
+
+display(
+    spark.createDataFrame([text_integrity_result])
+)
+
+review_text_preserved = (
+    text_missing_from_silver == 0
+    and text_unexpected_in_silver == 0
+)
+
+print(
+    "Review text preservation: "
+    + ("PASS" if review_text_preserved else "FAIL")
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,42B - Audit Review Text Integrity and Cardinality
+# Count orders with multiple review records
+bronze_multiple_review_orders = (
+    bronze_reviews
+    .groupBy("order_id")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+silver_multiple_review_orders = (
+    silver_reviews
+    .groupBy("order_id")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+# Inspect review ID reuse
+review_id_duplicates = (
+    silver_reviews
+    .groupBy("review_id")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+# Inspect review score distribution
+print("Review score distribution:")
+
+display(
+    silver_reviews
+    .groupBy("review_score")
+    .count()
+    .orderBy("review_score")
+)
+
+# Summarize review cardinality
+review_cardinality = {
+    "bronze_orders_with_multiple_reviews":
+        bronze_multiple_review_orders,
+    "silver_orders_with_multiple_reviews":
+        silver_multiple_review_orders,
+    "duplicated_review_id_groups":
+        review_id_duplicates
+}
+
+display(
+    spark.createDataFrame([review_cardinality])
+)
+
+review_cardinality_preserved = (
+    bronze_multiple_review_orders
+    == silver_multiple_review_orders
+)
+
+print(
+    "Review cardinality preservation: "
+    + ("PASS" if review_cardinality_preserved else "FAIL")
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,42C - Audit Review Text Integrity and Cardinality
+# Define previously validated multiline review
+KNOWN_REVIEW_ID = (
+    "5090899e38cd55729c9783745f2706f5"
+)
+
+KNOWN_ORDER_ID = (
+    "1b76802b72eb5517c97481ee2f7b7037"
+)
+
+EXPECTED_PHRASE = (
+    'No "mercado livre" isso não acontece!!'
+)
+
+# Locate the known review in Silver
+known_review = silver_reviews.filter(
+    (F.col("review_id") == KNOWN_REVIEW_ID)
+    & (F.col("order_id") == KNOWN_ORDER_ID)
+)
+
+# Check record existence and expected phrase
+known_review_count = known_review.count()
+
+known_phrase_count = known_review.filter(
+    F.instr(
+        F.col("review_comment_message"),
+        EXPECTED_PHRASE
+    ) > 0
+).count()
+
+# Inspect preserved comment
+display(
+    known_review.select(
+        "review_id",
+        "order_id",
+        "review_score",
+        "review_comment_message"
+    )
+)
+
+known_review_passed = (
+    known_review_count == 1
+    and known_phrase_count == 1
+)
+
+print(f"Known review records: {known_review_count}")
+print(f"Expected phrase matches: {known_phrase_count}")
+
+print(
+    "Known multiline review validation: "
+    + ("PASS" if known_review_passed else "FAIL")
+)
+
+# Consolidate audit validation gates
+review_audit_passed = (
+    review_text_preserved
+    and review_cardinality_preserved
+    and known_review_passed
+)
+
+if not review_audit_passed:
+    raise ValueError(
+        "Review text or cardinality audit failed."
+    )
+
+print("All Review content audits passed.")
+
+# COMMAND ----------
+
+# DBTITLE 1,43 - Write Silver Reviews Delta Table
+# Validate all required gates
+if not review_validation_passed:
+    raise ValueError(
+        "Review structural validation failed."
+    )
+
+if not review_audit_passed:
+    raise ValueError(
+        "Review text integrity audit failed."
+    )
+
+target_table = TARGET_TABLES["reviews"]
+
+# Write Silver Reviews using full-load strategy
+(
+    silver_reviews.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(target_table)
+)
+
+print(f"Successfully written: {target_table}")
+
+# COMMAND ----------
+
+# DBTITLE 1,44 - Validate Persisted Silver Reviews
+# Read persisted Silver Reviews
+persisted_reviews = spark.table(
+    TARGET_TABLES["reviews"]
+)
+
+# Validate persisted row count and composite key
+persisted_review_metrics = persisted_reviews.agg(
+
+    F.count("*").alias("persisted_count"),
+
+    F.countDistinct(
+        "review_id",
+        "order_id"
+    ).alias("distinct_review_keys"),
+
+    F.sum(
+        F.when(
+            F.col("review_id").isNull()
+            | F.col("order_id").isNull(),
+            1
+        ).otherwise(0)
+    ).alias("null_composite_keys")
+
+).first().asDict()
+
+# Align columns for full-data comparison
+expected_reviews = silver_reviews.select(
+    *silver_reviews.columns
+)
+
+actual_reviews = persisted_reviews.select(
+    *silver_reviews.columns
+)
+
+# Compare complete records in both directions
+missing_from_target = (
+    expected_reviews
+    .exceptAll(actual_reviews)
+    .count()
+)
+
+unexpected_in_target = (
+    actual_reviews
+    .exceptAll(expected_reviews)
+    .count()
+)
+
+# Validate multiple reviews per order
+persisted_multiple_review_orders = (
+    persisted_reviews
+    .groupBy("order_id")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+# Check persisted data types
+persisted_review_types_valid = (
+    persisted_reviews.schema["review_score"]
+        .dataType.simpleString() == "int"
+    and
+    all(
+        persisted_reviews.schema[column_name]
+            .dataType.simpleString() == "timestamp"
+        for column_name in REVIEW_TIMESTAMP_COLUMNS
+    )
+)
+
+# Consolidate final validation
+persisted_review_passed = (
+    review_validation_passed
+    and review_audit_passed
+    and persisted_review_metrics["persisted_count"]
+        == bronze_review_count
+    and persisted_review_metrics["distinct_review_keys"]
+        == bronze_review_count
+    and persisted_review_metrics["null_composite_keys"] == 0
+    and missing_from_target == 0
+    and unexpected_in_target == 0
+    and persisted_multiple_review_orders
+        == bronze_multiple_review_orders
+    and persisted_review_types_valid
+)
+
+validation_result = {
+    "source": "reviews",
+    "target_table": TARGET_TABLES["reviews"],
+    "bronze_count": bronze_review_count,
+    "persisted_count": persisted_review_metrics[
+        "persisted_count"
+    ],
+    "distinct_review_keys": persisted_review_metrics[
+        "distinct_review_keys"
+    ],
+    "null_composite_keys": persisted_review_metrics[
+        "null_composite_keys"
+    ],
+    "orders_with_multiple_reviews":
+        persisted_multiple_review_orders,
+    "missing_from_target": missing_from_target,
+    "unexpected_in_target": unexpected_in_target,
+    "types_valid": persisted_review_types_valid,
+    "status": (
+        "PASS"
+        if persisted_review_passed else "FAIL"
+    )
+}
+
+display(
+    spark.createDataFrame([validation_result])
+)
+
+if not persisted_review_passed:
+    raise ValueError(
+        "Persisted Silver Reviews validation failed."
+    )
+
+print("Persisted Silver Reviews validation: PASS")
