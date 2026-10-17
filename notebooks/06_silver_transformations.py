@@ -843,3 +843,454 @@ display(
         F.col(ZIP_COLUMN).isin("72915", "04011")
     )
 )
+
+# COMMAND ----------
+
+# DBTITLE 1,15 - Transform Orders
+from pyspark.sql import functions as F
+
+# Register source and target tables
+SOURCE_TABLES["orders"] = (
+    f"{CATALOG}.{BRONZE_SCHEMA}.br_orders"
+)
+
+TARGET_TABLES["orders"] = (
+    f"{CATALOG}.{SILVER_SCHEMA}.sl_orders"
+)
+
+# Define expected source columns
+ORDER_COLUMNS = [
+    "order_id",
+    "customer_id",
+    "order_status",
+    "order_purchase_timestamp",
+    "order_approved_at",
+    "order_delivered_carrier_date",
+    "order_delivered_customer_date",
+    "order_estimated_delivery_date"
+]
+
+ORDER_TIMESTAMP_COLUMNS = [
+    "order_purchase_timestamp",
+    "order_approved_at",
+    "order_delivered_carrier_date",
+    "order_delivered_customer_date",
+    "order_estimated_delivery_date"
+]
+
+# Read Bronze orders
+bronze_orders = spark.table(
+    SOURCE_TABLES["orders"]
+)
+
+# Validate source columns
+expected_columns = set(
+    ORDER_COLUMNS + METADATA_COLUMNS
+)
+
+missing_columns = sorted(
+    expected_columns - set(bronze_orders.columns)
+)
+
+if missing_columns:
+    raise ValueError(
+        f"Missing source columns: {missing_columns}"
+    )
+
+# Apply Silver transformations
+silver_orders = bronze_orders.select(
+
+    F.col("order_id")
+        .cast("string")
+        .alias("order_id"),
+
+    F.col("customer_id")
+        .cast("string")
+        .alias("customer_id"),
+
+    F.lower(
+        F.trim(F.col("order_status").cast("string"))
+    ).alias("order_status"),
+
+    *[
+        F.col(column_name)
+            .cast("timestamp")
+            .alias(column_name)
+        for column_name in ORDER_TIMESTAMP_COLUMNS
+    ],
+
+    *[
+        F.col(column_name)
+        for column_name in METADATA_COLUMNS
+    ]
+)
+
+print("Silver Orders transformation configured.")
+
+print("Source table:", SOURCE_TABLES["orders"])
+print("Target table:", TARGET_TABLES["orders"])
+
+display(silver_orders.limit(10))
+
+# COMMAND ----------
+
+# DBTITLE 1,16 - Validate Orders Granularity and Relationships
+# Compare Bronze and Silver row counts
+bronze_count = bronze_orders.count()
+silver_count = silver_orders.count()
+
+# Validate primary and foreign keys
+key_metrics = silver_orders.agg(
+
+    F.countDistinct("order_id").alias(
+        "distinct_order_ids"
+    ),
+
+    F.sum(
+        F.when(
+            F.col("order_id").isNull()
+            | (F.trim("order_id") == ""),
+            1
+        ).otherwise(0)
+    ).alias("invalid_order_id_rows"),
+
+    F.sum(
+        F.when(
+            F.col("customer_id").isNull()
+            | (F.trim("customer_id") == ""),
+            1
+        ).otherwise(0)
+    ).alias("invalid_customer_id_rows"),
+
+    F.sum(
+        F.when(
+            F.col("order_status").isNull()
+            | (F.col("order_status") == ""),
+            1
+        ).otherwise(0)
+    ).alias("invalid_order_status_rows")
+
+).first().asDict()
+
+# Validate customer relationships
+silver_customers_reference = (
+    spark.table(
+        f"{CATALOG}.{SILVER_SCHEMA}.sl_customers"
+    )
+    .select("customer_id")
+    .distinct()
+)
+
+orphan_orders = (
+    silver_orders
+    .select("order_id", "customer_id")
+    .join(
+        silver_customers_reference,
+        on="customer_id",
+        how="left_anti"
+    )
+    .count()
+)
+
+# Check timestamp data types and null preservation
+invalid_timestamp_types = []
+
+timestamp_null_losses = {}
+
+for column_name in ORDER_TIMESTAMP_COLUMNS:
+
+    actual_type = (
+        silver_orders.schema[column_name]
+        .dataType.simpleString()
+    )
+
+    if actual_type != "timestamp":
+        invalid_timestamp_types.append(column_name)
+
+bronze_timestamp_counts = bronze_orders.agg(
+    *[
+        F.count(column_name).alias(column_name)
+        for column_name in ORDER_TIMESTAMP_COLUMNS
+    ]
+).first()
+
+silver_timestamp_counts = silver_orders.agg(
+    *[
+        F.count(column_name).alias(column_name)
+        for column_name in ORDER_TIMESTAMP_COLUMNS
+    ]
+).first()
+
+for column_name in ORDER_TIMESTAMP_COLUMNS:
+
+    timestamp_null_losses[column_name] = (
+        bronze_timestamp_counts[column_name]
+        - silver_timestamp_counts[column_name]
+    )
+
+# Build validation result
+orders_validation = {
+    "bronze_count": bronze_count,
+    "silver_count": silver_count,
+    "distinct_order_ids": key_metrics["distinct_order_ids"],
+    "invalid_order_id_rows": key_metrics["invalid_order_id_rows"],
+    "invalid_customer_id_rows": key_metrics["invalid_customer_id_rows"],
+    "invalid_order_status_rows": key_metrics["invalid_order_status_rows"],
+    "orphan_orders": orphan_orders,
+    "invalid_timestamp_types": len(invalid_timestamp_types),
+    "timestamp_null_losses": sum(
+        abs(value)
+        for value in timestamp_null_losses.values()
+    )
+}
+
+orders_validation_passed = (
+    bronze_count == silver_count
+    and silver_count == key_metrics["distinct_order_ids"]
+    and key_metrics["invalid_order_id_rows"] == 0
+    and key_metrics["invalid_customer_id_rows"] == 0
+    and key_metrics["invalid_order_status_rows"] == 0
+    and orphan_orders == 0
+    and len(invalid_timestamp_types) == 0
+    and all(
+        value == 0
+        for value in timestamp_null_losses.values()
+    )
+)
+
+orders_validation["status"] = (
+    "PASS" if orders_validation_passed else "FAIL"
+)
+
+display(
+    spark.createDataFrame([orders_validation])
+)
+
+print("Timestamp null preservation:")
+print(timestamp_null_losses)
+
+if not orders_validation_passed:
+    raise ValueError(
+        "Silver Orders validation failed."
+    )
+
+print("All Silver Orders validations passed.")
+
+# COMMAND ----------
+
+# DBTITLE 1,17 - Profile Order Status and Timestamp Consistency
+# Inspect session timezone without changing it
+print(
+    "Session timezone:",
+    spark.conf.get("spark.sql.session.timeZone")
+)
+
+# Inspect order status distribution
+print("Order status distribution:")
+
+display(
+    silver_orders
+    .groupBy("order_status")
+    .count()
+    .orderBy(F.desc("count"))
+)
+
+# Identify unexpected status values
+KNOWN_ORDER_STATUSES = [
+    "delivered",
+    "shipped",
+    "canceled",
+    "unavailable",
+    "invoiced",
+    "processing",
+    "created",
+    "approved"
+]
+
+unexpected_status_count = (
+    silver_orders
+    .filter(
+        ~F.col("order_status").isin(*KNOWN_ORDER_STATUSES)
+    )
+    .count()
+)
+
+# Profile temporal consistency
+temporal_metrics = silver_orders.agg(
+
+    F.min("order_purchase_timestamp").alias(
+        "earliest_purchase"
+    ),
+
+    F.max("order_purchase_timestamp").alias(
+        "latest_purchase"
+    ),
+
+    F.sum(
+        F.when(
+            F.col("order_purchase_timestamp").isNull(),
+            1
+        ).otherwise(0)
+    ).alias("missing_purchase_timestamp"),
+
+    F.sum(
+        F.when(
+            F.col("order_estimated_delivery_date").isNull(),
+            1
+        ).otherwise(0)
+    ).alias("missing_estimated_delivery_date"),
+
+    F.sum(
+        F.when(
+            (F.col("order_status") == "delivered")
+            & F.col("order_delivered_customer_date").isNull(),
+            1
+        ).otherwise(0)
+    ).alias("delivered_without_delivery_date"),
+
+    F.sum(
+        F.when(
+            F.col("order_approved_at")
+            < F.col("order_purchase_timestamp"),
+            1
+        ).otherwise(0)
+    ).alias("approval_before_purchase"),
+
+    F.sum(
+        F.when(
+            F.col("order_estimated_delivery_date")
+            < F.col("order_purchase_timestamp"),
+            1
+        ).otherwise(0)
+    ).alias("estimated_delivery_before_purchase"),
+
+    F.sum(
+        F.when(
+            F.col("order_delivered_customer_date")
+            < F.col("order_purchase_timestamp"),
+            1
+        ).otherwise(0)
+    ).alias("delivery_before_purchase"),
+
+    F.sum(
+        F.when(
+            F.col("order_delivered_carrier_date")
+            > F.col("order_delivered_customer_date"),
+            1
+        ).otherwise(0)
+    ).alias("carrier_timestamp_after_customer_delivery")
+
+)
+
+print("Temporal quality profile:")
+
+display(temporal_metrics)
+
+print(
+    f"Unexpected order statuses: {unexpected_status_count}"
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,18 - Write Silver Orders Delta Table
+# Prevent writing invalid transformed data
+if not orders_validation_passed:
+    raise ValueError(
+        "Silver Orders validation must pass before writing."
+    )
+
+target_table = TARGET_TABLES["orders"]
+
+# Write the Silver table
+(
+    silver_orders.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(target_table)
+)
+
+print(f"Successfully written: {target_table}")
+
+# COMMAND ----------
+
+# DBTITLE 1,19 - Validate Persisted Silver Orders
+# Read persisted Silver table
+persisted_orders = spark.table(
+    TARGET_TABLES["orders"]
+)
+
+# Validate row count and key uniqueness
+persisted_metrics = persisted_orders.agg(
+
+    F.count("*").alias("persisted_count"),
+
+    F.countDistinct("order_id").alias(
+        "distinct_order_ids"
+    ),
+
+    F.sum(
+        F.when(
+            F.col("order_id").isNull(), 1
+        ).otherwise(0)
+    ).alias("null_order_ids")
+
+).first().asDict()
+
+# Align column order for exact comparison
+expected_orders = silver_orders.select(
+    *silver_orders.columns
+)
+
+actual_orders = persisted_orders.select(
+    *silver_orders.columns
+)
+
+# Compare rows in both directions
+missing_from_target = (
+    expected_orders
+    .exceptAll(actual_orders)
+    .count()
+)
+
+unexpected_in_target = (
+    actual_orders
+    .exceptAll(expected_orders)
+    .count()
+)
+
+# Build validation result
+persisted_validation = {
+    "source": "orders",
+    "target_table": TARGET_TABLES["orders"],
+    "bronze_count": bronze_count,
+    "persisted_count": persisted_metrics["persisted_count"],
+    "distinct_order_ids": persisted_metrics["distinct_order_ids"],
+    "null_order_ids": persisted_metrics["null_order_ids"],
+    "missing_from_target": missing_from_target,
+    "unexpected_in_target": unexpected_in_target
+}
+
+persisted_validation_passed = (
+    orders_validation_passed
+    and persisted_metrics["persisted_count"] == bronze_count
+    and persisted_metrics["distinct_order_ids"] == bronze_count
+    and persisted_metrics["null_order_ids"] == 0
+    and missing_from_target == 0
+    and unexpected_in_target == 0
+)
+
+persisted_validation["status"] = (
+    "PASS" if persisted_validation_passed else "FAIL"
+)
+
+display(
+    spark.createDataFrame([persisted_validation])
+)
+
+if not persisted_validation_passed:
+    raise ValueError(
+        "Persisted Silver Orders validation failed."
+    )
+
+print("Persisted Silver Orders validation: PASS")
