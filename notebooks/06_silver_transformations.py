@@ -1785,3 +1785,666 @@ if not persisted_item_validation_passed:
     )
 
 print("Persisted Silver Order Items validation: PASS")
+
+# COMMAND ----------
+
+# DBTITLE 1,25 - Transform Payments
+# Register source and target tables
+SOURCE_TABLES["payments"] = (
+    f"{CATALOG}.{BRONZE_SCHEMA}.br_payments"
+)
+
+TARGET_TABLES["payments"] = (
+    f"{CATALOG}.{SILVER_SCHEMA}.sl_payments"
+)
+
+# Define expected source columns
+PAYMENT_COLUMNS = [
+    "order_id",
+    "payment_sequential",
+    "payment_type",
+    "payment_installments",
+    "payment_value"
+]
+
+# Read Bronze source
+bronze_payments = spark.table(
+    SOURCE_TABLES["payments"]
+)
+
+# Validate source contract
+expected_columns = set(
+    PAYMENT_COLUMNS + METADATA_COLUMNS
+)
+
+missing_columns = sorted(
+    expected_columns - set(bronze_payments.columns)
+)
+
+if missing_columns:
+    raise ValueError(
+        f"Missing source columns: {missing_columns}"
+    )
+
+# Apply Silver transformations
+silver_payments = bronze_payments.select(
+
+    F.col("order_id")
+        .cast("string")
+        .alias("order_id"),
+
+    F.col("payment_sequential")
+        .cast("int")
+        .alias("payment_sequential"),
+
+    F.lower(
+        F.trim(F.col("payment_type").cast("string"))
+    ).alias("payment_type"),
+
+    F.col("payment_installments")
+        .cast("int")
+        .alias("payment_installments"),
+
+    F.col("payment_value")
+        .cast("decimal(18,2)")
+        .alias("payment_value"),
+
+    *[
+        F.col(column_name)
+        for column_name in METADATA_COLUMNS
+    ]
+)
+
+print("Silver Payments transformation configured.")
+
+silver_payments.printSchema()
+
+display(silver_payments.limit(10))
+
+# COMMAND ----------
+
+# DBTITLE 1,26 - Validate Payment Keys and Relationships
+# Reconcile source and transformed row counts
+bronze_payment_count = bronze_payments.count()
+silver_payment_count = silver_payments.count()
+
+# Validate required keys
+payment_key_metrics = silver_payments.agg(
+
+    F.countDistinct(
+        "order_id",
+        "payment_sequential"
+    ).alias("distinct_payment_keys"),
+
+    F.sum(
+        F.when(
+            F.col("order_id").isNull()
+            | (F.trim("order_id") == ""),
+            1
+        ).otherwise(0)
+    ).alias("invalid_order_id_rows"),
+
+    F.sum(
+        F.when(
+            F.col("payment_sequential").isNull(),
+            1
+        ).otherwise(0)
+    ).alias("null_payment_sequential_rows"),
+
+    F.sum(
+        F.when(
+            F.col("payment_sequential") <= 0,
+            1
+        ).otherwise(0)
+    ).alias("nonpositive_payment_sequential_rows")
+
+).first().asDict()
+
+# Validate composite key uniqueness
+duplicate_payment_keys = (
+    silver_payments
+    .groupBy("order_id", "payment_sequential")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+# Load Silver Orders reference
+orders_reference = (
+    spark.table(
+        f"{CATALOG}.{SILVER_SCHEMA}.sl_orders"
+    )
+    .select("order_id")
+    .distinct()
+)
+
+# Validate referential integrity
+orphan_payment_rows = (
+    silver_payments
+    .select("order_id")
+    .join(
+        orders_reference,
+        on="order_id",
+        how="left_anti"
+    )
+    .count()
+)
+
+# Validate column types
+payment_key_types_valid = (
+    silver_payments.schema["order_id"]
+        .dataType.simpleString() == "string"
+    and
+    silver_payments.schema["payment_sequential"]
+        .dataType.simpleString() == "int"
+)
+
+# Build validation results
+payment_validation = {
+    "bronze_count": bronze_payment_count,
+    "silver_count": silver_payment_count,
+    "distinct_payment_keys": payment_key_metrics[
+        "distinct_payment_keys"
+    ],
+    "duplicate_key_groups": duplicate_payment_keys,
+    "invalid_order_id_rows": payment_key_metrics[
+        "invalid_order_id_rows"
+    ],
+    "null_payment_sequential_rows": payment_key_metrics[
+        "null_payment_sequential_rows"
+    ],
+    "nonpositive_payment_sequential_rows": payment_key_metrics[
+        "nonpositive_payment_sequential_rows"
+    ],
+    "orphan_payment_rows": orphan_payment_rows,
+    "payment_key_types_valid": payment_key_types_valid
+}
+
+payment_validation_passed = (
+    bronze_payment_count == silver_payment_count
+    and payment_key_metrics["distinct_payment_keys"]
+        == silver_payment_count
+    and duplicate_payment_keys == 0
+    and payment_key_metrics["invalid_order_id_rows"] == 0
+    and payment_key_metrics["null_payment_sequential_rows"] == 0
+    and payment_key_metrics[
+        "nonpositive_payment_sequential_rows"
+    ] == 0
+    and orphan_payment_rows == 0
+    and payment_key_types_valid
+)
+
+payment_validation["status"] = (
+    "PASS" if payment_validation_passed else "FAIL"
+)
+
+display(
+    spark.createDataFrame([payment_validation])
+)
+
+if not payment_validation_passed:
+    raise ValueError(
+        "Silver Payments key and relationship validation failed."
+    )
+
+print("All Payment key and relationship validations passed.")
+
+# COMMAND ----------
+
+# DBTITLE 1,27A - Audit Payment Quality and Order Amounts
+# Validate monetary conversion safety
+converted_payment_value = F.expr(
+    "try_cast(`payment_value` AS DECIMAL(18,2))"
+)
+
+payment_financial_metrics = bronze_payments.agg(
+
+    F.sum(
+        F.when(
+            F.col("payment_value").isNotNull()
+            & converted_payment_value.isNull(),
+            1
+        ).otherwise(0)
+    ).alias("payment_value_conversion_failures"),
+
+    F.sum(
+        F.when(
+            F.col("payment_value").isNotNull()
+            & converted_payment_value.isNotNull()
+            & (
+                F.abs(
+                    F.col("payment_value").cast("double")
+                    - converted_payment_value.cast("double")
+                ) > 0.000001
+            ),
+            1
+        ).otherwise(0)
+    ).alias("payment_value_precision_changes")
+
+).first().asDict()
+
+print("Payment financial conversion assessment:")
+
+display(
+    spark.createDataFrame([payment_financial_metrics])
+)
+
+# Validate required financial type
+payment_financial_type_valid = (
+    silver_payments.schema["payment_value"]
+        .dataType.simpleString() == "decimal(18,2)"
+)
+
+payment_financial_passed = (
+    payment_financial_metrics[
+        "payment_value_conversion_failures"
+    ] == 0
+    and payment_financial_metrics[
+        "payment_value_precision_changes"
+    ] == 0
+    and payment_financial_type_valid
+)
+
+print(
+    "Payment financial precision: "
+    + ("PASS" if payment_financial_passed else "FAIL")
+)
+
+if not payment_financial_passed:
+    raise ValueError(
+        "Payment monetary conversion validation failed."
+    )
+
+# COMMAND ----------
+
+# DBTITLE 1,27B - Audit Payment Quality and Order Amounts
+# Profile payment quality
+payment_quality_metrics = silver_payments.agg(
+
+    F.sum(
+        F.when(
+            F.col("payment_value").isNull(), 1
+        ).otherwise(0)
+    ).alias("missing_payment_value_rows"),
+
+    F.sum(
+        F.when(
+            F.col("payment_value") < 0, 1
+        ).otherwise(0)
+    ).alias("negative_payment_value_rows"),
+
+    F.sum(
+        F.when(
+            F.col("payment_value") == 0, 1
+        ).otherwise(0)
+    ).alias("zero_payment_value_rows"),
+
+    F.sum(
+        F.when(
+            F.col("payment_installments").isNull(), 1
+        ).otherwise(0)
+    ).alias("missing_installments_rows"),
+
+    F.sum(
+        F.when(
+            F.col("payment_installments") == 0, 1
+        ).otherwise(0)
+    ).alias("zero_installments_rows"),
+
+    F.sum(
+        F.when(
+            F.col("payment_installments") < 0, 1
+        ).otherwise(0)
+    ).alias("negative_installments_rows"),
+
+    F.sum(
+        F.when(
+            F.col("payment_type").isNull()
+            | (F.col("payment_type") == ""),
+            1
+        ).otherwise(0)
+    ).alias("missing_payment_type_rows")
+
+).first().asDict()
+
+print("Payment quality profile:")
+
+display(
+    spark.createDataFrame([payment_quality_metrics])
+)
+
+# Inspect payment method distribution
+print("Payment method distribution:")
+
+display(
+    silver_payments
+    .groupBy("payment_type")
+    .agg(
+        F.count("*").alias("payment_records"),
+        F.sum("payment_value").alias("total_payment_value")
+    )
+    .orderBy(F.desc("payment_records"))
+)
+
+# Inspect number of payments per order
+payments_per_order = (
+    silver_payments
+    .groupBy("order_id")
+    .agg(
+        F.count("*").alias("payment_record_count")
+    )
+)
+
+print("Payments per order distribution:")
+
+display(
+    payments_per_order
+    .groupBy("payment_record_count")
+    .count()
+    .orderBy("payment_record_count")
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,27C- Audit Payment Quality and Order Amounts C
+# Aggregate payments to order level
+payment_totals = (
+    silver_payments
+    .groupBy("order_id")
+    .agg(
+        F.sum("payment_value").alias(
+            "total_payment_value"
+        ),
+        F.count("*").alias(
+            "payment_record_count"
+        )
+    )
+)
+
+# Aggregate order items to order level
+order_item_totals = (
+    spark.table(
+        f"{CATALOG}.{SILVER_SCHEMA}.sl_order_items"
+    )
+    .groupBy("order_id")
+    .agg(
+        F.sum(
+            F.col("price") + F.col("freight_value")
+        ).alias("total_items_and_freight"),
+
+        F.count("*").alias("item_record_count")
+    )
+)
+
+# Compare independently aggregated totals
+order_amount_comparison = (
+    payment_totals
+    .join(
+        order_item_totals,
+        on="order_id",
+        how="full_outer"
+    )
+    .withColumn(
+        "amount_difference",
+        F.col("total_payment_value")
+        - F.col("total_items_and_freight")
+    )
+)
+
+# Build reconciliation summary
+amount_reconciliation = order_amount_comparison.agg(
+
+    F.count("*").alias("orders_compared"),
+
+    F.sum(
+        F.when(
+            F.col("payment_record_count").isNotNull()
+            & F.col("item_record_count").isNull(),
+            1
+        ).otherwise(0)
+    ).alias("payment_orders_without_items"),
+
+    F.sum(
+        F.when(
+            F.col("item_record_count").isNotNull()
+            & F.col("payment_record_count").isNull(),
+            1
+        ).otherwise(0)
+    ).alias("item_orders_without_payments"),
+
+    F.sum(
+        F.when(
+            F.col("total_payment_value").isNotNull()
+            & F.col("total_items_and_freight").isNotNull()
+            & (F.abs(F.col("amount_difference")) > 0.01),
+            1
+        ).otherwise(0)
+    ).alias("orders_with_amount_difference"),
+
+    F.max(
+        F.abs(F.col("amount_difference"))
+    ).alias("maximum_absolute_difference")
+
+).first().asDict()
+
+print("Order amount reconciliation:")
+
+display(
+    spark.createDataFrame([amount_reconciliation])
+)
+
+# Inspect examples of mismatched amounts
+print("Largest payment-to-item differences:")
+
+display(
+    order_amount_comparison
+    .filter(
+        F.col("amount_difference").isNotNull()
+        & (F.abs(F.col("amount_difference")) > 0.01)
+    )
+    .orderBy(
+        F.desc(F.abs(F.col("amount_difference")))
+    )
+    .limit(10)
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,27D - Investigate Payment Reconciliation Exceptions
+# Load Silver Orders for status analysis
+orders_status = (
+    spark.table(
+        f"{CATALOG}.{SILVER_SCHEMA}.sl_orders"
+    )
+    .select(
+        "order_id",
+        "order_status"
+    )
+)
+
+# Classify financial reconciliation results
+reconciliation_detail = (
+    order_amount_comparison
+    .join(
+        orders_status,
+        on="order_id",
+        how="left"
+    )
+    .withColumn(
+        "reconciliation_category",
+
+        F.when(
+            F.col("payment_record_count").isNull(),
+            "ITEMS_WITHOUT_PAYMENT"
+        )
+
+        .when(
+            F.col("item_record_count").isNull(),
+            "PAYMENT_WITHOUT_ITEMS"
+        )
+
+        .when(
+            F.abs(F.col("amount_difference")) > 0.01,
+            "AMOUNT_MISMATCH"
+        )
+
+        .otherwise("MATCHED")
+    )
+)
+
+# Analyze exceptions by order status
+print("Reconciliation categories by order status:")
+
+display(
+    reconciliation_detail
+    .groupBy(
+        "reconciliation_category",
+        "order_status"
+    )
+    .count()
+    .orderBy(
+        "reconciliation_category",
+        F.desc("count")
+    )
+)
+
+# Inspect zero-value and zero-installment payments
+print("Payments requiring additional review:")
+
+display(
+    silver_payments
+    .filter(
+        (F.col("payment_value") == 0)
+        | (F.col("payment_installments") == 0)
+    )
+    .select(
+        "order_id",
+        "payment_sequential",
+        "payment_type",
+        "payment_installments",
+        "payment_value"
+    )
+    .orderBy(
+        "payment_type",
+        "order_id"
+    )
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,28 - Write Silver Payments Delta Table
+# Check validation gates before writing
+if not payment_validation_passed:
+    raise ValueError(
+        "Payment key and relationship validation failed."
+    )
+
+if not payment_financial_passed:
+    raise ValueError(
+        "Payment financial validation failed."
+    )
+
+target_table = TARGET_TABLES["payments"]
+
+# Write Silver Payments using full-load strategy
+(
+    silver_payments.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(target_table)
+)
+
+print(f"Successfully written: {target_table}")
+
+# COMMAND ----------
+
+# DBTITLE 1,29 - Validate Persisted Silver Payments
+# Read persisted Silver table
+persisted_payments = spark.table(
+    TARGET_TABLES["payments"]
+)
+
+# Validate persisted row count
+persisted_payment_count = persisted_payments.count()
+
+# Validate composite key uniqueness
+persisted_duplicate_payment_keys = (
+    persisted_payments
+    .groupBy("order_id", "payment_sequential")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+# Align columns for full-data comparison
+expected_payments = silver_payments.select(
+    *silver_payments.columns
+)
+
+actual_payments = persisted_payments.select(
+    *silver_payments.columns
+)
+
+# Compare expected and persisted records
+missing_from_target = (
+    expected_payments
+    .exceptAll(actual_payments)
+    .count()
+)
+
+unexpected_in_target = (
+    actual_payments
+    .exceptAll(expected_payments)
+    .count()
+)
+
+# Validate persisted schema
+persisted_types_valid = (
+    persisted_payments.schema["payment_sequential"]
+        .dataType.simpleString() == "int"
+    and
+    persisted_payments.schema["payment_installments"]
+        .dataType.simpleString() == "int"
+    and
+    persisted_payments.schema["payment_value"]
+        .dataType.simpleString() == "decimal(18,2)"
+)
+
+# Define final validation
+persisted_payment_validation_passed = (
+    payment_validation_passed
+    and payment_financial_passed
+    and persisted_payment_count == bronze_payment_count
+    and persisted_duplicate_payment_keys == 0
+    and missing_from_target == 0
+    and unexpected_in_target == 0
+    and persisted_types_valid
+)
+
+validation_result = {
+    "source": "payments",
+    "target_table": TARGET_TABLES["payments"],
+    "bronze_count": bronze_payment_count,
+    "persisted_count": persisted_payment_count,
+    "duplicate_key_groups": persisted_duplicate_payment_keys,
+    "missing_from_target": missing_from_target,
+    "unexpected_in_target": unexpected_in_target,
+    "persisted_types_valid": persisted_types_valid,
+    "status": (
+        "PASS"
+        if persisted_payment_validation_passed
+        else "FAIL"
+    )
+}
+
+display(
+    spark.createDataFrame([validation_result])
+)
+
+if not persisted_payment_validation_passed:
+    raise ValueError(
+        "Persisted Silver Payments validation failed."
+    )
+
+print("Persisted Silver Payments validation: PASS")
