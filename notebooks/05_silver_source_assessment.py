@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # DBTITLE 1,01 - Define Source Contracts
 from pyspark.sql import functions as F
 
@@ -175,8 +179,10 @@ display(
 # COMMAND ----------
 
 # DBTITLE 1,04 - Profile ZIP Code Formats
+from pyspark.sql import functions as F
+
 ZIP_COLUMNS = {
-    "customers": "customer_zip_code_prefix''",
+    "customers": "customer_zip_code_prefix",
     "sellers": "seller_zip_code_prefix",
     "geolocation": "geolocation_zip_code_prefix"
 }
@@ -187,21 +193,32 @@ for source, column_name in ZIP_COLUMNS.items():
 
     df = spark.table(BRONZE_TABLES[source])
 
+    # Validate that the configured column exists
+    if column_name not in df.columns:
+        raise ValueError(
+            f"Invalid column for {source}: {column_name!r}. "
+            f"Available columns: {df.columns}"
+        )
+
+    # Convert the ZIP prefix to text for profiling
     zip_text = F.trim(
         F.col(column_name).cast("string")
     )
 
+    # Calculate ZIP format metrics
     result = df.agg(
         F.count("*").alias("total_rows"),
 
         F.sum(
-            F.when(F.col(column_name).isNull(), 1)
-             .otherwise(0)
+            F.when(
+                F.col(column_name).isNull(), 1
+            ).otherwise(0)
         ).alias("null_zip_rows"),
 
         F.sum(
-            F.when(zip_text.rlike(r"^[0-9]{1,4}$"), 1)
-             .otherwise(0)
+            F.when(
+                zip_text.rlike(r"^[0-9]{1,4}$"), 1
+            ).otherwise(0)
         ).alias("short_zip_rows"),
 
         F.sum(
@@ -213,16 +230,19 @@ for source, column_name in ZIP_COLUMNS.items():
         ).alias("invalid_format_rows"),
 
         F.sum(
-            F.when(zip_text.rlike(r"^0[0-9]{4}$"), 1)
-             .otherwise(0)
+            F.when(
+                zip_text.rlike(r"^0[0-9]{4}$"), 1
+            ).otherwise(0)
         ).alias("leading_zero_rows")
+
     ).first()
 
     zip_results.append({
         "source": source,
-        "bronze_data_type": df.schema[
-            column_name
-        ].dataType.simpleString(),
+        "bronze_data_type": (
+            df.schema[column_name]
+            .dataType.simpleString()
+        ),
         "total_rows": int(result["total_rows"]),
         "null_zip_rows": int(result["null_zip_rows"]),
         "short_zip_rows": int(result["short_zip_rows"]),
