@@ -2448,3 +2448,576 @@ if not persisted_payment_validation_passed:
     )
 
 print("Persisted Silver Payments validation: PASS")
+
+# COMMAND ----------
+
+# DBTITLE 1,30 - Transform Products
+from pyspark.sql import functions as F
+
+# Register source and target tables
+SOURCE_TABLES["products"] = (
+    f"{CATALOG}.{BRONZE_SCHEMA}.br_products"
+)
+
+TARGET_TABLES["products"] = (
+    f"{CATALOG}.{SILVER_SCHEMA}.sl_products"
+)
+
+# Define source-to-target column contracts
+PRODUCT_INTEGER_COLUMNS = {
+    "product_name_lenght": "product_name_length",
+    "product_description_lenght": "product_description_length",
+    "product_photos_qty": "product_photos_qty"
+}
+
+PRODUCT_DOUBLE_COLUMNS = [
+    "product_weight_g",
+    "product_length_cm",
+    "product_height_cm",
+    "product_width_cm"
+]
+
+PRODUCT_SOURCE_COLUMNS = [
+    "product_id",
+    "product_category_name",
+    *PRODUCT_INTEGER_COLUMNS.keys(),
+    *PRODUCT_DOUBLE_COLUMNS
+]
+
+# Read Bronze source
+bronze_products = spark.table(
+    SOURCE_TABLES["products"]
+)
+
+# Validate source column contract
+missing_columns = sorted(
+    set(PRODUCT_SOURCE_COLUMNS + METADATA_COLUMNS)
+    - set(bronze_products.columns)
+)
+
+if missing_columns:
+    raise ValueError(
+        f"Missing product source columns: {missing_columns}"
+    )
+
+# Normalize category without replacing missing values
+category_text = F.trim(
+    F.col("product_category_name").cast("string")
+)
+
+normalized_category = (
+    F.when(
+        category_text.isNull() | (category_text == ""),
+        F.lit(None).cast("string")
+    )
+    .otherwise(F.lower(category_text))
+)
+
+# Build Silver Products
+silver_products = bronze_products.select(
+
+    F.col("product_id")
+        .cast("string")
+        .alias("product_id"),
+
+    normalized_category.alias("product_category_name"),
+
+    *[
+        F.col(source_column)
+            .cast("int")
+            .alias(target_column)
+        for source_column, target_column
+        in PRODUCT_INTEGER_COLUMNS.items()
+    ],
+
+    *[
+        F.col(column_name)
+            .cast("double")
+            .alias(column_name)
+        for column_name in PRODUCT_DOUBLE_COLUMNS
+    ],
+
+    *[
+        F.col(column_name)
+        for column_name in METADATA_COLUMNS
+    ]
+)
+
+print("Silver Products transformation configured.")
+
+silver_products.printSchema()
+
+display(silver_products.limit(10))
+
+# COMMAND ----------
+
+# DBTITLE 1,31 - Validate Product Keys and Relationships
+# Reconcile row counts
+bronze_product_count = bronze_products.count()
+silver_product_count = silver_products.count()
+
+# Validate primary key
+product_key_metrics = silver_products.agg(
+
+    F.countDistinct("product_id").alias(
+        "distinct_product_ids"
+    ),
+
+    F.sum(
+        F.when(
+            F.col("product_id").isNull()
+            | (F.trim("product_id") == ""),
+            1
+        ).otherwise(0)
+    ).alias("invalid_product_id_rows")
+
+).first().asDict()
+
+# Check duplicate primary keys
+duplicate_product_keys = (
+    silver_products
+    .groupBy("product_id")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+# Load Silver Order Items
+order_item_products = (
+    spark.table(
+        f"{CATALOG}.{SILVER_SCHEMA}.sl_order_items"
+    )
+    .select("product_id")
+)
+
+# Check whether any order item references a missing product
+orphan_product_items = (
+    order_item_products
+    .join(
+        silver_products.select("product_id"),
+        on="product_id",
+        how="left_anti"
+    )
+    .count()
+)
+
+# Define expected numeric types
+expected_numeric_types = {
+    **{
+        target_column: "int"
+        for target_column
+        in PRODUCT_INTEGER_COLUMNS.values()
+    },
+    **{
+        column_name: "double"
+        for column_name in PRODUCT_DOUBLE_COLUMNS
+    }
+}
+
+# Validate Silver schema
+invalid_numeric_types = [
+    column_name
+    for column_name, expected_type
+    in expected_numeric_types.items()
+    if (
+        silver_products.schema[column_name]
+        .dataType.simpleString() != expected_type
+    )
+]
+
+# Build validation result
+product_validation = {
+    "bronze_count": bronze_product_count,
+    "silver_count": silver_product_count,
+    "distinct_product_ids": product_key_metrics[
+        "distinct_product_ids"
+    ],
+    "duplicate_key_groups": duplicate_product_keys,
+    "invalid_product_id_rows": product_key_metrics[
+        "invalid_product_id_rows"
+    ],
+    "orphan_product_items": orphan_product_items,
+    "invalid_numeric_types": len(invalid_numeric_types)
+}
+
+product_validation_passed = (
+    bronze_product_count == silver_product_count
+    and product_key_metrics["distinct_product_ids"]
+        == silver_product_count
+    and duplicate_product_keys == 0
+    and product_key_metrics["invalid_product_id_rows"] == 0
+    and orphan_product_items == 0
+    and len(invalid_numeric_types) == 0
+)
+
+product_validation["status"] = (
+    "PASS" if product_validation_passed else "FAIL"
+)
+
+display(
+    spark.createDataFrame([product_validation])
+)
+
+if not product_validation_passed:
+    raise ValueError(
+        "Silver Products structural validation failed."
+    )
+
+print("All Product key and relationship validations passed.")
+
+# COMMAND ----------
+
+# DBTITLE 1,32A - Audit Product Attributes and Category Coverage
+# Define numeric conversion contracts
+NUMERIC_CONTRACTS = {
+    **{
+        column_name: "int"
+        for column_name in PRODUCT_INTEGER_COLUMNS
+    },
+    **{
+        column_name: "double"
+        for column_name in PRODUCT_DOUBLE_COLUMNS
+    }
+}
+
+conversion_results = []
+
+for column_name, target_type in NUMERIC_CONTRACTS.items():
+
+    original = F.col(column_name)
+
+    converted = F.expr(
+        f"try_cast(`{column_name}` AS {target_type})"
+    )
+
+    metrics = bronze_products.agg(
+
+        F.sum(
+            F.when(
+                original.isNotNull()
+                & converted.isNull(),
+                1
+            ).otherwise(0)
+        ).alias("conversion_failures"),
+
+        F.sum(
+            F.when(
+                original.isNotNull()
+                & converted.isNotNull()
+                & (
+                    F.abs(
+                        original.cast("double")
+                        - converted.cast("double")
+                    ) > 0.000001
+                ),
+                1
+            ).otherwise(0)
+        ).alias("value_changes")
+
+    ).first().asDict()
+
+    conversion_results.append({
+        "column_name": column_name,
+        "target_type": target_type,
+        **metrics
+    })
+
+display(
+    spark.createDataFrame(conversion_results)
+)
+
+product_conversion_passed = all(
+    row["conversion_failures"] == 0
+    and row["value_changes"] == 0
+    for row in conversion_results
+)
+
+print(
+    "Product numeric conversion validation: "
+    + ("PASS" if product_conversion_passed else "FAIL")
+)
+
+if not product_conversion_passed:
+    raise ValueError(
+        "Product numeric conversion validation failed."
+    )
+
+# COMMAND ----------
+
+# DBTITLE 1,32B - Audit Product Attributes and Category Coverage
+# Define Silver numeric columns
+PRODUCT_NUMERIC_COLUMNS = [
+    *PRODUCT_INTEGER_COLUMNS.values(),
+    *PRODUCT_DOUBLE_COLUMNS
+]
+
+attribute_quality_results = []
+
+for column_name in PRODUCT_NUMERIC_COLUMNS:
+
+    metrics = silver_products.agg(
+
+        F.sum(
+            F.when(
+                F.col(column_name).isNull(),
+                1
+            ).otherwise(0)
+        ).alias("null_rows"),
+
+        F.sum(
+            F.when(
+                F.col(column_name) < 0,
+                1
+            ).otherwise(0)
+        ).alias("negative_rows"),
+
+        F.sum(
+            F.when(
+                F.col(column_name) == 0,
+                1
+            ).otherwise(0)
+        ).alias("zero_rows")
+
+    ).first().asDict()
+
+    attribute_quality_results.append({
+        "column_name": column_name,
+        **metrics
+    })
+
+print("Product attribute quality profile:")
+
+display(
+    spark.createDataFrame(attribute_quality_results)
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,32C - Audit Product Attributes and Category Coverage
+# Count products without a valid category
+missing_category_rows = (
+    silver_products
+    .filter(
+        F.col("product_category_name").isNull()
+    )
+    .count()
+)
+
+# Load and normalize reference categories
+translation_reference = (
+    spark.table(
+        f"{CATALOG}.{BRONZE_SCHEMA}.br_product_category_translation"
+    )
+    .select(
+        F.lower(
+            F.trim(
+                F.col("product_category_name")
+            )
+        ).alias("product_category_name")
+    )
+    .filter(
+        F.col("product_category_name").isNotNull()
+        & (F.col("product_category_name") != "")
+    )
+    .distinct()
+)
+
+# Identify products without translation mapping
+unmatched_product_categories = (
+    silver_products
+    .filter(
+        F.col("product_category_name").isNotNull()
+    )
+    .join(
+        translation_reference,
+        on="product_category_name",
+        how="left_anti"
+    )
+)
+
+unmatched_category_rows = (
+    unmatched_product_categories.count()
+)
+
+print("Product category coverage:")
+
+category_metrics = {
+    "total_products": silver_product_count,
+    "missing_category_rows": missing_category_rows,
+    "unmatched_translation_rows": unmatched_category_rows
+}
+
+display(
+    spark.createDataFrame([category_metrics])
+)
+
+print("Categories without translation mapping:")
+
+display(
+    unmatched_product_categories
+    .groupBy("product_category_name")
+    .count()
+    .orderBy(F.desc("count"))
+)
+
+# COMMAND ----------
+
+# DBTITLE 1,33 - Write Silver Products Delta Table
+# Validate structural and numeric gates
+if not product_validation_passed:
+    raise ValueError(
+        "Product structural validation failed."
+    )
+
+if not product_conversion_passed:
+    raise ValueError(
+        "Product numeric conversion validation failed."
+    )
+
+target_table = TARGET_TABLES["products"]
+
+# Write Silver Products using full-load strategy
+(
+    silver_products.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(target_table)
+)
+
+print(f"Successfully written: {target_table}")
+
+# COMMAND ----------
+
+# DBTITLE 1,34 - Validate Persisted Silver Products
+# Read persisted Silver table
+persisted_products = spark.table(
+    TARGET_TABLES["products"]
+)
+
+# Validate persisted row count and primary key
+persisted_product_metrics = persisted_products.agg(
+
+    F.count("*").alias("persisted_count"),
+
+    F.countDistinct("product_id").alias(
+        "distinct_product_ids"
+    ),
+
+    F.sum(
+        F.when(
+            F.col("product_id").isNull()
+            | (F.trim("product_id") == ""),
+            1
+        ).otherwise(0)
+    ).alias("invalid_product_ids"),
+
+    F.sum(
+        F.when(
+            F.col("product_category_name").isNull(),
+            1
+        ).otherwise(0)
+    ).alias("missing_category_rows")
+
+).first().asDict()
+
+# Validate persisted schema
+persisted_schema_valid = (
+    persisted_products.schema["product_id"]
+        .dataType.simpleString() == "string"
+    and
+    persisted_products.schema["product_category_name"]
+        .dataType.simpleString() == "string"
+    and
+    all(
+        persisted_products.schema[column_name]
+            .dataType.simpleString() == expected_type
+        for column_name, expected_type
+        in expected_numeric_types.items()
+    )
+)
+
+# Align columns before comparison
+expected_products = silver_products.select(
+    *silver_products.columns
+)
+
+actual_products = persisted_products.select(
+    *silver_products.columns
+)
+
+# Compare expected and persisted datasets
+missing_from_target = (
+    expected_products
+    .exceptAll(actual_products)
+    .count()
+)
+
+unexpected_in_target = (
+    actual_products
+    .exceptAll(expected_products)
+    .count()
+)
+
+# Revalidate referential integrity after persistence
+persisted_orphan_product_items = (
+    order_item_products
+    .join(
+        persisted_products.select("product_id"),
+        on="product_id",
+        how="left_anti"
+    )
+    .count()
+)
+
+# Define persisted validation result
+persisted_product_validation_passed = (
+    product_validation_passed
+    and product_conversion_passed
+    and persisted_product_metrics["persisted_count"]
+        == bronze_product_count
+    and persisted_product_metrics["distinct_product_ids"]
+        == bronze_product_count
+    and persisted_product_metrics["invalid_product_ids"] == 0
+    and persisted_product_metrics["missing_category_rows"]
+        == missing_category_rows
+    and persisted_orphan_product_items == 0
+    and missing_from_target == 0
+    and unexpected_in_target == 0
+    and persisted_schema_valid
+)
+
+validation_result = {
+    "source": "products",
+    "target_table": TARGET_TABLES["products"],
+    "bronze_count": bronze_product_count,
+    "persisted_count": persisted_product_metrics[
+        "persisted_count"
+    ],
+    "distinct_product_ids": persisted_product_metrics[
+        "distinct_product_ids"
+    ],
+    "missing_category_rows": persisted_product_metrics[
+        "missing_category_rows"
+    ],
+    "orphan_product_items": persisted_orphan_product_items,
+    "missing_from_target": missing_from_target,
+    "unexpected_in_target": unexpected_in_target,
+    "schema_valid": persisted_schema_valid,
+    "status": (
+        "PASS"
+        if persisted_product_validation_passed
+        else "FAIL"
+    )
+}
+
+display(
+    spark.createDataFrame([validation_result])
+)
+
+if not persisted_product_validation_passed:
+    raise ValueError(
+        "Persisted Silver Products validation failed."
+    )
+
+print("Persisted Silver Products validation: PASS")
