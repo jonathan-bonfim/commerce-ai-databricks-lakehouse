@@ -1294,3 +1294,494 @@ if not persisted_validation_passed:
     )
 
 print("Persisted Silver Orders validation: PASS")
+
+# COMMAND ----------
+
+# DBTITLE 1,20 - Transform Order Items
+# Register source and target tables
+SOURCE_TABLES["order_items"] = (
+    f"{CATALOG}.{BRONZE_SCHEMA}.br_order_items"
+)
+
+TARGET_TABLES["order_items"] = (
+    f"{CATALOG}.{SILVER_SCHEMA}.sl_order_items"
+)
+
+# Define expected source columns
+ORDER_ITEM_COLUMNS = [
+    "order_id",
+    "order_item_id",
+    "product_id",
+    "seller_id",
+    "shipping_limit_date",
+    "price",
+    "freight_value"
+]
+
+# Read Bronze source
+bronze_order_items = spark.table(
+    SOURCE_TABLES["order_items"]
+)
+
+# Validate source contract
+expected_columns = set(
+    ORDER_ITEM_COLUMNS + METADATA_COLUMNS
+)
+
+missing_columns = sorted(
+    expected_columns - set(bronze_order_items.columns)
+)
+
+if missing_columns:
+    raise ValueError(
+        f"Missing source columns: {missing_columns}"
+    )
+
+# Apply Silver transformations
+silver_order_items = bronze_order_items.select(
+
+    F.col("order_id")
+        .cast("string")
+        .alias("order_id"),
+
+    F.col("order_item_id")
+        .cast("int")
+        .alias("order_item_id"),
+
+    F.col("product_id")
+        .cast("string")
+        .alias("product_id"),
+
+    F.col("seller_id")
+        .cast("string")
+        .alias("seller_id"),
+
+    F.col("shipping_limit_date")
+        .cast("timestamp")
+        .alias("shipping_limit_date"),
+
+    F.col("price")
+        .cast("decimal(18,2)")
+        .alias("price"),
+
+    F.col("freight_value")
+        .cast("decimal(18,2)")
+        .alias("freight_value"),
+
+    *[
+        F.col(column_name)
+        for column_name in METADATA_COLUMNS
+    ]
+)
+
+print("Silver Order Items transformation configured.")
+
+silver_order_items.printSchema()
+
+display(silver_order_items.limit(10))
+
+# COMMAND ----------
+
+# DBTITLE 1,21 - Validate Order Item Keys and Relationships
+# Reconcile source and transformed row counts
+bronze_item_count = bronze_order_items.count()
+silver_item_count = silver_order_items.count()
+
+# Validate required identifiers
+item_key_metrics = silver_order_items.agg(
+
+    F.sum(
+        F.when(
+            F.col("order_id").isNull()
+            | (F.trim("order_id") == ""),
+            1
+        ).otherwise(0)
+    ).alias("invalid_order_id_rows"),
+
+    F.sum(
+        F.when(
+            F.col("order_item_id").isNull(),
+            1
+        ).otherwise(0)
+    ).alias("invalid_order_item_id_rows"),
+
+    F.sum(
+        F.when(
+            F.col("product_id").isNull()
+            | (F.trim("product_id") == ""),
+            1
+        ).otherwise(0)
+    ).alias("invalid_product_id_rows"),
+
+    F.sum(
+        F.when(
+            F.col("seller_id").isNull()
+            | (F.trim("seller_id") == ""),
+            1
+        ).otherwise(0)
+    ).alias("invalid_seller_id_rows")
+
+).first().asDict()
+
+# Validate composite key uniqueness
+duplicate_item_keys = (
+    silver_order_items
+    .groupBy("order_id", "order_item_id")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+# Load relationship references
+orders_reference = (
+    spark.table(
+        f"{CATALOG}.{SILVER_SCHEMA}.sl_orders"
+    )
+    .select("order_id")
+    .distinct()
+)
+
+sellers_reference = (
+    spark.table(
+        f"{CATALOG}.{SILVER_SCHEMA}.sl_sellers"
+    )
+    .select("seller_id")
+    .distinct()
+)
+
+products_reference = (
+    spark.table(
+        f"{CATALOG}.{BRONZE_SCHEMA}.br_products"
+    )
+    .select("product_id")
+    .distinct()
+)
+
+# Check orphan records
+orphan_order_items = (
+    silver_order_items
+    .select("order_id")
+    .join(orders_reference, "order_id", "left_anti")
+    .count()
+)
+
+orphan_seller_items = (
+    silver_order_items
+    .select("seller_id")
+    .join(sellers_reference, "seller_id", "left_anti")
+    .count()
+)
+
+orphan_product_items = (
+    silver_order_items
+    .select("product_id")
+    .join(products_reference, "product_id", "left_anti")
+    .count()
+)
+
+# Build validation results
+item_validation = {
+    "bronze_count": bronze_item_count,
+    "silver_count": silver_item_count,
+    "duplicate_key_groups": duplicate_item_keys,
+    "orphan_order_items": orphan_order_items,
+    "orphan_seller_items": orphan_seller_items,
+    "orphan_product_items": orphan_product_items,
+    **item_key_metrics
+}
+
+item_validation_passed = (
+    bronze_item_count == silver_item_count
+    and duplicate_item_keys == 0
+    and orphan_order_items == 0
+    and orphan_seller_items == 0
+    and orphan_product_items == 0
+    and all(
+        value == 0
+        for value in item_key_metrics.values()
+    )
+)
+
+item_validation["status"] = (
+    "PASS" if item_validation_passed else "FAIL"
+)
+
+display(spark.createDataFrame([item_validation]))
+
+if not item_validation_passed:
+    raise ValueError(
+        "Silver Order Items validation failed."
+    )
+
+print("All Order Items key and relationship validations passed.")
+
+# COMMAND ----------
+
+# DBTITLE 1,22 - Audit Monetary Precision and Item Quality
+# Define financial columns
+FINANCIAL_COLUMNS = [
+    "price",
+    "freight_value"
+]
+
+# Build financial conversion checks
+financial_checks = []
+
+for column_name in FINANCIAL_COLUMNS:
+
+    original_value = F.col(column_name).cast("double")
+
+    decimal_value = F.col(column_name).cast(
+        "decimal(18,2)"
+    )
+
+    financial_checks.extend([
+
+        F.sum(
+            F.when(
+                F.col(column_name).isNotNull()
+                & decimal_value.isNull(),
+                1
+            ).otherwise(0)
+        ).alias(f"{column_name}_conversion_failures"),
+
+        F.sum(
+            F.when(
+                original_value.isNotNull()
+                & (
+                    F.abs(
+                        original_value
+                        - decimal_value.cast("double")
+                    ) > 0.000001
+                ),
+                1
+            ).otherwise(0)
+        ).alias(f"{column_name}_precision_changes")
+
+    ])
+
+# Evaluate financial conversion safety
+financial_metrics = (
+    bronze_order_items
+    .agg(*financial_checks)
+    .first()
+    .asDict()
+)
+
+print("Financial conversion assessment:")
+
+display(spark.createDataFrame([financial_metrics]))
+
+# Check additional data quality conditions
+item_quality_metrics = (
+    silver_order_items
+    .agg(
+
+        F.sum(
+            F.when(
+                F.col("price").isNull(), 1
+            ).otherwise(0)
+        ).alias("missing_price_rows"),
+
+        F.sum(
+            F.when(
+                F.col("freight_value").isNull(), 1
+            ).otherwise(0)
+        ).alias("missing_freight_rows"),
+
+        F.sum(
+            F.when(
+                F.col("price") < 0, 1
+            ).otherwise(0)
+        ).alias("negative_price_rows"),
+
+        F.sum(
+            F.when(
+                F.col("freight_value") < 0, 1
+            ).otherwise(0)
+        ).alias("negative_freight_rows"),
+
+        F.sum(
+            F.when(
+                F.col("price") == 0, 1
+            ).otherwise(0)
+        ).alias("zero_price_rows"),
+
+        F.sum(
+            F.when(
+                F.col("shipping_limit_date").isNull(), 1
+            ).otherwise(0)
+        ).alias("missing_shipping_limit_rows")
+
+    )
+    .first()
+    .asDict()
+)
+
+print("Order Items quality profile:")
+
+display(spark.createDataFrame([item_quality_metrics]))
+
+# Compare shipping deadlines with purchase timestamps
+shipping_deadline_profile = (
+    silver_order_items
+    .join(
+        spark.table(
+            f"{CATALOG}.{SILVER_SCHEMA}.sl_orders"
+        ).select(
+            "order_id",
+            "order_purchase_timestamp"
+        ),
+        on="order_id",
+        how="left"
+    )
+    .agg(
+        F.sum(
+            F.when(
+                F.col("shipping_limit_date")
+                < F.col("order_purchase_timestamp"),
+                1
+            ).otherwise(0)
+        ).alias("shipping_deadline_before_purchase")
+    )
+    .first()
+    .asDict()
+)
+
+print("Shipping deadline assessment:")
+
+display(spark.createDataFrame([shipping_deadline_profile]))
+
+# Define financial precision gate
+financial_precision_passed = all(
+    financial_metrics[
+        f"{column_name}_conversion_failures"
+    ] == 0
+    and financial_metrics[
+        f"{column_name}_precision_changes"
+    ] == 0
+    for column_name in FINANCIAL_COLUMNS
+)
+
+print(
+    "Financial precision validation: "
+    + ("PASS" if financial_precision_passed else "FAIL")
+)
+
+if not financial_precision_passed:
+    raise ValueError(
+        "Financial conversion introduced unexpected changes."
+    )
+
+# COMMAND ----------
+
+# DBTITLE 1,23 - Write Silver Order Items Delta Table
+# Validate all required gates before writing
+if not item_validation_passed:
+    raise ValueError(
+        "Order Items structural validation failed."
+    )
+
+if not financial_precision_passed:
+    raise ValueError(
+        "Order Items financial precision validation failed."
+    )
+
+target_table = TARGET_TABLES["order_items"]
+
+# Write Delta table using full-load strategy
+(
+    silver_order_items.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(target_table)
+)
+
+print(f"Successfully written: {target_table}")
+
+# COMMAND ----------
+
+# DBTITLE 1,24 - Validate Persisted Silver Order Items
+# Read persisted Silver table
+persisted_order_items = spark.table(
+    TARGET_TABLES["order_items"]
+)
+
+# Validate persisted count
+persisted_item_count = persisted_order_items.count()
+
+# Validate persisted composite key
+persisted_duplicate_keys = (
+    persisted_order_items
+    .groupBy("order_id", "order_item_id")
+    .count()
+    .filter(F.col("count") > 1)
+    .count()
+)
+
+# Align columns before comparing datasets
+expected_items = silver_order_items.select(
+    *silver_order_items.columns
+)
+
+actual_items = persisted_order_items.select(
+    *silver_order_items.columns
+)
+
+# Compare expected and persisted content
+missing_from_target = (
+    expected_items
+    .exceptAll(actual_items)
+    .count()
+)
+
+unexpected_in_target = (
+    actual_items
+    .exceptAll(expected_items)
+    .count()
+)
+
+# Verify persisted financial data types
+financial_types_valid = all(
+    persisted_order_items.schema[column_name]
+    .dataType.simpleString() == "decimal(18,2)"
+    for column_name in FINANCIAL_COLUMNS
+)
+
+# Define persisted validation
+persisted_item_validation_passed = (
+    item_validation_passed
+    and financial_precision_passed
+    and persisted_item_count == bronze_item_count
+    and persisted_duplicate_keys == 0
+    and missing_from_target == 0
+    and unexpected_in_target == 0
+    and financial_types_valid
+)
+
+validation_result = {
+    "source": "order_items",
+    "bronze_count": bronze_item_count,
+    "persisted_count": persisted_item_count,
+    "duplicate_key_groups": persisted_duplicate_keys,
+    "missing_from_target": missing_from_target,
+    "unexpected_in_target": unexpected_in_target,
+    "financial_types_valid": financial_types_valid,
+    "status": (
+        "PASS"
+        if persisted_item_validation_passed
+        else "FAIL"
+    )
+}
+
+display(
+    spark.createDataFrame([validation_result])
+)
+
+if not persisted_item_validation_passed:
+    raise ValueError(
+        "Persisted Order Items validation failed."
+    )
+
+print("Persisted Silver Order Items validation: PASS")
