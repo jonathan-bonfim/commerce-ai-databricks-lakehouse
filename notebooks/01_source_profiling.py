@@ -6,8 +6,12 @@
 # MAGIC %md
 # MAGIC # Source Profiling
 # MAGIC
-# MAGIC This notebook profiles the raw Olist CSV files before Bronze ingestion. It is intentionally read-only and applies the same source-specific parsing rules used by the Bronze pipeline.
+# MAGIC **Purpose:** Explore the nine raw Olist CSV sources and diagnose source-specific parsing behavior before ingestion.
 # MAGIC
+# MAGIC **Inputs:** `/Volumes/commerceai/bronze/raw_files/`.  
+# MAGIC **Outputs:** Read-only row counts, inferred schemas, review parsing diagnostics, and a known multiline-review sample.  
+# MAGIC **Execution:** Manual exploration/development notebook; **not** part of routine ingestion jobs.  
+# MAGIC **Scope:** Uses the same review CSV parsing options as Bronze ingestion. Does not write Delta tables.
 
 # COMMAND ----------
 

@@ -1,30 +1,26 @@
 # Databricks notebook source
-# /// script
-# [tool.databricks.environment]
-# environment_version = "6"
-# ///
 # MAGIC %md
 # MAGIC # Bronze Ingestion
 # MAGIC
-# MAGIC This notebook ingests all raw Olist CSV sources into Delta tables in the Bronze layer. Source-specific CSV parsing rules are driven by configuration so that no manual reprocessing step is required.
+# MAGIC **Purpose:** Ingest the nine raw Olist CSV files from the Unity Catalog Volume into Bronze Delta tables.
+# MAGIC
+# MAGIC **Inputs:** `/Volumes/commerceai/bronze/raw_files/`  
+# MAGIC **Outputs:** `commerceai.bronze.br_*` (nine Delta tables)  
+# MAGIC **Execution:** Full refresh; suitable for the ingestion task in a pipeline.  
+# MAGIC **Validation owner:** `03_bronze_validation` reconciles raw row counts and metadata after ingestion.  
+# MAGIC **Scope:** Retain source fidelity, source-specific CSV parsing (including multiline reviews), and ingestion metadata. No data quality profiling or repeated row-count scans here.
+# MAGIC
+# MAGIC > Run this notebook only when you intentionally want to refresh the Bronze layer. `overwrite` replaces the existing Bronze tables.
 # MAGIC
 
 # COMMAND ----------
 
-# DBTITLE 1,01 - Imports
+# DBTITLE 1,01 - Configure Bronze Sources
 from pyspark.sql.functions import current_timestamp, col
 
-
-# COMMAND ----------
-
-# DBTITLE 1,02 - Environment Configuration
 BASE_PATH = "/Volumes/commerceai/bronze/raw_files"
 BRONZE_SCHEMA = "commerceai.bronze"
 
-
-# COMMAND ----------
-
-# DBTITLE 1,03 - Source Configuration
 sources = {
     "customers": {
         "file_name": "olist_customers_dataset.csv",
@@ -82,78 +78,49 @@ sources = {
 
 # COMMAND ----------
 
-# DBTITLE 1,04 - Bronze Ingestion Function
-def ingest_csv_to_bronze(
-    source_name: str,
-    file_name: str,
-    target_table: str,
-    read_options: dict = None
-):
-    """
-    Read a raw CSV file from the landing volume and write it
-    as a Delta table in the Bronze layer.
+# DBTITLE 1,02 - Define Bronze Ingestion
+def ingest_csv_to_bronze(source_name: str, config: dict) -> dict:
+    """Load one source CSV and overwrite its Bronze Delta table."""
+    source_path = f"{BASE_PATH}/{source_name}/{config['file_name']}"
+    target_table = f"{BRONZE_SCHEMA}.{config['target_table']}"
 
-    Source-specific CSV options can be provided through read_options.
-    """
-
-    source_path = f"{BASE_PATH}/{source_name}/{file_name}"
-    full_target_table = f"{BRONZE_SCHEMA}.{target_table}"
-
-    reader = (
-        spark.read
-        .option("header", True)
-        .option("inferSchema", True)
-    )
-
-    for option_name, option_value in (read_options or {}).items():
+    reader = spark.read.option("header", True).option("inferSchema", True)
+    for option_name, option_value in config.get("read_options", {}).items():
         reader = reader.option(option_name, option_value)
 
-    df = reader.csv(source_path)
-
-    df_bronze = (
-        df
+    source_df = reader.csv(source_path)
+    bronze_df = (
+        source_df
         .withColumn("bronze_ingestion_timestamp", current_timestamp())
         .withColumn("source_file_name", col("_metadata.file_name"))
         .withColumn("source_file_path", col("_metadata.file_path"))
     )
-
     (
-        df_bronze.write
-        .format("delta")
+        bronze_df.write.format("delta")
         .mode("overwrite")
         .option("overwriteSchema", "true")
-        .saveAsTable(full_target_table)
+        .saveAsTable(target_table)
     )
-
     return {
         "source": source_name,
-        "target_table": full_target_table,
-        "row_count": df_bronze.count(),
-        "column_count": len(df_bronze.columns)
+        "target_table": target_table,
+        "column_count": len(bronze_df.columns)
     }
 
 
 # COMMAND ----------
 
-# DBTITLE 1,05 - Run Bronze Ingestion
+# DBTITLE 1,03 - Ingest All Sources
 ingestion_results = []
 
 for source_name, config in sources.items():
-    result = ingest_csv_to_bronze(
-        source_name=source_name,
-        file_name=config["file_name"],
-        target_table=config["target_table"],
-        read_options=config.get("read_options", {})
-    )
-
-    ingestion_results.append(result)
+    ingestion_results.append(ingest_csv_to_bronze(source_name, config))
+    print(f"Bronze table written: {ingestion_results[-1]['target_table']}")
 
 
 # COMMAND ----------
 
-# DBTITLE 1,06 - Ingestion Summary
-ingestion_results_df = spark.createDataFrame(ingestion_results)
-
-display(
-    ingestion_results_df.orderBy("source")
-)
+# DBTITLE 1,04 - Report Ingestion Results
+print(f"Bronze tables written: {len(ingestion_results)}")
+display(spark.createDataFrame(ingestion_results).orderBy("source"))
+print("Run 03_bronze_validation to reconcile source and Bronze row counts.")

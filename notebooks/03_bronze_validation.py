@@ -6,8 +6,12 @@
 # MAGIC %md
 # MAGIC # Bronze Validation
 # MAGIC
-# MAGIC This notebook reconciles the raw source row counts against the Bronze Delta tables and validates that the required Bronze metadata columns are present. It fails fast when reconciliation does not pass.
+# MAGIC **Purpose:** Reconcile raw CSV counts with persisted Bronze Delta tables and verify required ingestion metadata.
 # MAGIC
+# MAGIC **Inputs:** Raw CSV files in the landing Volume and `commerceai.bronze.br_*`.  
+# MAGIC **Outputs:** Source-to-Bronze reconciliation and required-metadata checks.  
+# MAGIC **Execution:** Quality gate task **after** `02_bronze_ingestion`; fails when reconciliation or required metadata fails.  
+# MAGIC **Scope:** No writes to Bronze or Silver; this notebook is not exploratory data profiling.
 
 # COMMAND ----------
 

@@ -3,6 +3,19 @@
 # [tool.databricks.environment]
 # environment_version = "6"
 # ///
+# MAGIC %md
+# MAGIC # Silver Source Assessment
+# MAGIC
+# MAGIC **Purpose:** Assess Bronze readiness before defining or changing Silver transformation rules.
+# MAGIC
+# MAGIC **Inputs:** `commerceai.bronze.br_*` (nine Bronze Delta tables).  
+# MAGIC **Outputs:** Read-only source contracts, observed schemas, ZIP-code diagnostics, type-conversion assessment, geolocation conflicts, and category-coverage findings.  
+# MAGIC **Execution:** Manual development/investigation notebook; **not** part of a routine pipeline.  
+# MAGIC **Validation owner:** `07_silver_validation` handles the repeatable operational gate after the Silver build.  
+# MAGIC **Scope:** Diagnostics only. No Bronze or Silver tables are modified.
+
+# COMMAND ----------
+
 # DBTITLE 1,01 - Define Source Contracts
 from pyspark.sql import functions as F
 

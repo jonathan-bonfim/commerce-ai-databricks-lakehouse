@@ -6,8 +6,12 @@
 # MAGIC %md
 # MAGIC # Bronze Data Quality
 # MAGIC
-# MAGIC This notebook profiles key quality, nulls, referential integrity, geolocation granularity, and review parsing quality before any Silver transformations are applied.
+# MAGIC **Purpose:** Investigate Bronze source characteristics and anomalies that inform Silver design decisions.
 # MAGIC
+# MAGIC **Inputs:** `commerceai.bronze.br_*`.  
+# MAGIC **Outputs:** Read-only profiling of keys, nulls, relationships, geolocation duplicates, status distributions, customer identity, and review cardinality/parsing integrity.  
+# MAGIC **Execution:** Manual investigation and documentation; **not** a routine job task.  
+# MAGIC **Scope:** Baseline evidence for modeling and cleaning decisions; operational Silver quality is checked independently in `07_silver_validation`.
 
 # COMMAND ----------
 
