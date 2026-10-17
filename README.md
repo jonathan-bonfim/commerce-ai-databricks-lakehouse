@@ -1,636 +1,317 @@
-# CommerceAI — Databricks Lakehouse & Machine Learning
+# CommerceAI — Databricks Lakehouse, SQL Analytics & Machine Learning
 
-CommerceAI is an end-to-end Data Engineering portfolio project built with Databricks, Delta Lake, Machine Learning, Generative AI, and Power BI.
+CommerceAI is an end-to-end Data Engineering portfolio project built around the **Brazilian E-Commerce Public Dataset by Olist**. Its goal is to turn raw transactional data into trustworthy, reusable analytical datasets and, in future phases, delivery-delay predictions, AI-assisted customer feedback analysis, and Power BI dashboards.
 
-The project uses the Brazilian E-Commerce Public Dataset by Olist to build a complete Lakehouse architecture, from raw data ingestion to analytical dashboards and predictive models.
+The project uses a **Medallion Architecture** on **Databricks Free Edition** with **Unity Catalog**, **Delta Lake**, **PySpark**, and **Spark SQL**. The forthcoming Gold layer will be **SQL-first**, with substantive `.sql` scripts tracked in GitHub alongside the Databricks notebooks.
 
-> 🚧 **Work in progress — Bronze layer completed.**
-
----
-
-## Project Goals
-
-The main goal of CommerceAI is to build a realistic end-to-end Data Engineering project while exploring advanced capabilities of the Databricks ecosystem.
-
-The project is designed to demonstrate practical experience with:
-
-- Databricks
-- PySpark
-- Spark SQL
-- Delta Lake
-- Unity Catalog
-- Medallion Architecture
-- Data Quality
-- Data Modeling
-- Machine Learning with Spark ML
-- MLflow
-- Generative AI / LLM use cases
-- Databricks SQL
-- Power BI
-
-The project is being developed using only free resources, including Databricks Free Edition and Power BI Desktop.
+> **Project status — October 17, 2026:** ✅ Bronze completed · ✅ Silver completed (**PASS WITH WARNINGS**) · ⏳ Gold, Machine Learning, Review AI, and Power BI not started.
+>
+> **Last executed integrated Silver gate:** **83 checks — 69 PASS, 14 WARN, 0 FAIL**, across all **9 Silver tables**. Warnings are documented source-data and coverage limitations, not silent corrections.
 
 ---
 
-## Business Context
+## Project objectives
 
-CommerceAI simulates an e-commerce analytics platform capable of processing transactional data and generating insights about:
+- Build a realistic, reproducible Lakehouse pipeline using Databricks, Delta Lake, and Unity Catalog.
+- Demonstrate ingestion, data profiling, data contracts, controlled transformations, referential integrity, and quality gates.
+- Design reusable **SQL-based Gold data marts** for dimensional analytics and Power BI.
+- Learn practical Machine Learning with **Spark ML** and experiment tracking with **MLflow**.
+- Explore customer-review sentiment and feedback classification with AI/LLM tools when available under free usage limits.
+- Publish transparent architecture, technical decisions, SQL, and Python code for an international Data Engineering portfolio.
 
-- orders;
-- customers;
-- sellers;
-- products;
-- payments;
-- logistics;
-- delivery performance;
-- customer satisfaction.
-
-Future project stages will also include:
-
-- delivery delay prediction using Machine Learning;
-- customer review classification using AI / LLMs;
-- analytical modeling;
-- Power BI dashboards.
+**Cost constraint:** The project is designed to use free resources only. Access to individual Databricks AI features, SQL Warehouse capabilities, or Power BI connectivity will be verified before they are adopted.
 
 ---
 
-## Dataset
+## Business context
 
-The project uses the **Brazilian E-Commerce Public Dataset by Olist**, publicly available on Kaggle.
+The source represents anonymized Brazilian e-commerce orders, customers, order items, sellers, products, payments, deliveries, geolocation records, and customer reviews. CommerceAI aims to support analysis of order performance, customer purchasing patterns, product and seller performance, payment behavior, logistics, and customer feedback.
 
-The dataset contains approximately 100,000 anonymized e-commerce orders and includes information about:
+Two later analytical tracks are planned:
 
-- customers;
-- orders;
-- order items;
-- payments;
-- reviews;
-- products;
-- sellers;
-- geolocation;
-- product category translations.
+1. **Delivery Delay Prediction:** predict whether an eligible order will arrive later than the estimated delivery date, using only information that would have been available at prediction time.
+2. **Review Intelligence:** classify customer feedback independently from the delivery prediction workflow, preventing post-delivery data leakage.
 
-The following source files are used:
-
-```text
-olist_customers_dataset.csv
-olist_geolocation_dataset.csv
-olist_order_items_dataset.csv
-olist_order_payments_dataset.csv
-olist_order_reviews_dataset.csv
-olist_orders_dataset.csv
-olist_products_dataset.csv
-olist_sellers_dataset.csv
-product_category_name_translation.csv
-```
-
-Raw datasets are intentionally **not stored in this repository**.
-
-They are stored in a Unity Catalog Volume inside Databricks.
+Neither track has been implemented yet.
 
 ---
 
 ## Architecture
 
-The planned architecture follows the Medallion Architecture pattern:
+```text
+                 Olist CSV files (9 sources)
+                            |
+                            v
+             Unity Catalog Volume (raw_files)
+                            |
+                            v
+                 +--------------------+
+                 | Bronze Delta       |  COMPLETED
+                 | Source-aligned     |
+                 +--------------------+
+                            |
+                 Bronze validation gate
+                            |
+                            v
+                 +--------------------+
+                 | Silver Delta       |  COMPLETED
+                 | Conformed entities |
+                 +--------------------+
+                            |
+                 Silver validation gate
+                 69 PASS / 14 WARN / 0 FAIL
+                            |
+                            v
+                 +--------------------+
+                 | Gold Delta         |  PLANNED — SQL-FIRST
+                 | Dimensional marts  |
+                 +--------------------+
+                      |          |
+                      v          v
+             Business analytics  Future ML / review AI outputs
+                      |
+                      v
+           Databricks SQL / available access path
+                      |
+                      v
+                Power BI Desktop       PLANNED
+```
+
+The exact Gold dimensional model, ML feature pipeline, review-AI output tables, and reporting integration are **design decisions for future phases**, not existing assets.
+
+### Unity Catalog structure
 
 ```text
-Olist CSV Files
-      │
-      ▼
-Unity Catalog Volume
-      │
-      ▼
-┌──────────────┐
-│    Bronze    │
-│  Raw Delta   │
-└──────┬───────┘
-       │
-       ▼
-┌──────────────┐
-│    Silver    │
-│ Cleaned Data │
-└──────┬───────┘
-       │
-       ▼
-┌──────────────┐
-│     Gold     │
-│ Data Marts   │
-└──────┬───────┘
-       │
-       ├──────────────► Machine Learning
-       │
-       ├──────────────► AI / LLM
-       │
-       ▼
-Databricks SQL
-       │
-       ▼
-Power BI
+commerceai
+├── bronze
+│   ├── br_customers
+│   ├── br_geolocation
+│   ├── br_order_items
+│   ├── br_payments
+│   ├── br_reviews
+│   ├── br_orders
+│   ├── br_products
+│   ├── br_sellers
+│   ├── br_product_category_translation
+│   └── Volume: raw_files
+├── silver
+│   ├── sl_customers
+│   ├── sl_geolocation
+│   ├── sl_order_items
+│   ├── sl_payments
+│   ├── sl_reviews
+│   ├── sl_orders
+│   ├── sl_products
+│   ├── sl_sellers
+│   └── sl_product_category_translation
+├── gold    # Schema available; marts not yet implemented
+└── ml      # Schema available; ML datasets not yet implemented
 ```
+
+Raw files are uploaded to `/Volumes/commerceai/bronze/raw_files/`, separated into source-specific directories. **Raw Olist CSV files are not committed to this repository.**
 
 ---
 
-## Databricks Structure
+## Dataset and table inventory
 
-The project uses the following Unity Catalog structure:
+**Source:** [Brazilian E-Commerce Public Dataset by Olist (Kaggle)](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)
 
-```text
-Catalog
-└── commerceai
-    ├── bronze
-    ├── silver
-    ├── gold
-    └── ml
-```
+| Source | Raw CSV | Bronze rows | Silver rows |
+|---|---|---:|---:|
+| Customers | `olist_customers_dataset.csv` | 99,441 | 99,441 |
+| Geolocation | `olist_geolocation_dataset.csv` | 1,000,163 | 19,015 |
+| Order Items | `olist_order_items_dataset.csv` | 112,650 | 112,650 |
+| Payments | `olist_order_payments_dataset.csv` | 103,886 | 103,886 |
+| Reviews | `olist_order_reviews_dataset.csv` | 99,224 | 99,224 |
+| Orders | `olist_orders_dataset.csv` | 99,441 | 99,441 |
+| Products | `olist_products_dataset.csv` | 32,951 | 32,951 |
+| Sellers | `olist_sellers_dataset.csv` | 3,095 | 3,095 |
+| Category Translation | `product_category_name_translation.csv` | 71 | 71 |
 
-Raw source files are stored under:
+The reduction in Geolocation is **intentional**: the Silver table consolidates observations into **one representative record per ZIP code prefix**. The eight other Silver tables preserve source row counts.
 
-```text
-/Volumes/commerceai/bronze/raw_files/
-```
+### Source schemas and Silver grain
 
-Each dataset has its own source directory.
+| Silver table | Grain / key | Main fields |
+|---|---|---|
+| `sl_customers` | `customer_id` | `customer_unique_id`, ZIP, city, state |
+| `sl_geolocation` | `geolocation_zip_code_prefix` | representative latitude/longitude, selected city/state, quality flags and counts |
+| `sl_order_items` | `order_id`, `order_item_id` | `product_id`, `seller_id`, `shipping_limit_date`, `price`, `freight_value` |
+| `sl_payments` | `order_id`, `payment_sequential` | `payment_type`, `payment_installments`, `payment_value` |
+| `sl_reviews` | `review_id`, `order_id` | `review_score`, full comment title/message, review timestamps |
+| `sl_orders` | `order_id` | `customer_id`, status, purchase/approval/shipping/delivery timestamps |
+| `sl_products` | `product_id` | original category, product-description attributes, weight and dimensions |
+| `sl_sellers` | `seller_id` | ZIP, city, state |
+| `sl_product_category_translation` | `product_category_name` | `product_category_name_english` |
 
----
-
-## Current Status
-
-### Bronze Layer ✅
-
-The Bronze layer is completed.
-
-The implementation includes:
-
-- source profiling;
-- schema inspection;
-- source-specific CSV parsing;
-- reusable ingestion logic;
-- Delta table creation;
-- ingestion metadata;
-- source-to-Bronze reconciliation;
-- primary and composite key validation;
-- null profiling;
-- referential integrity analysis;
-- cardinality analysis;
-- geolocation quality analysis;
-- review parsing validation;
-- automated validation gates.
+**Customer identity matters:** Olist uses `customer_id` as an order-level customer identifier, while `customer_unique_id` identifies a repeat consumer. There are **99,441 distinct `customer_id` values** and **96,096 distinct `customer_unique_id` values**. These identifiers must not be used interchangeably.
 
 ---
 
-## Bronze Tables
+## Completed: Bronze layer
 
-The following Delta tables are currently available:
+The Bronze layer performs source-specific CSV ingestion and preserves source fidelity in Delta tables, including:
 
-```text
-commerceai.bronze.br_customers
-commerceai.bronze.br_geolocation
-commerceai.bronze.br_order_items
-commerceai.bronze.br_orders
-commerceai.bronze.br_payments
-commerceai.bronze.br_product_category_translation
-commerceai.bronze.br_products
-commerceai.bronze.br_reviews
-commerceai.bronze.br_sellers
+- Reusable ingestion for all nine source files.
+- Source-specific CSV options, including multiline review parsing.
+- Ingestion metadata: `bronze_ingestion_timestamp`, `source_file_name`, `source_file_path`.
+- Full-load Delta writes with `overwrite` and schema overwrite in the current historical-data implementation.
+- Raw-to-Bronze row-count reconciliation: **zero differences for all nine sources**.
+- Source-level profiling of keys, nulls, relationship integrity, geolocation cardinality, and reviews.
+
+### Review CSV parsing regression
+
+The Olist reviews CSV contains line breaks and quotes inside free-text comments. Incorrect parsing initially produced **104,162 rows**; using `multiLine` alone produced **99,249**. The validated parsing options produced **99,224 correctly structured review records**:
+
+```python
+"multiLine": True
+"quote": '"'
+"escape": '"'
+"unescapedQuoteHandling": "BACK_TO_DELIMITER"
 ```
 
-Each Bronze table also contains technical ingestion metadata:
-
-```text
-bronze_ingestion_timestamp
-source_file_name
-source_file_path
-```
+The pipeline validates a previously problematic multiline review to protect against regression. Reviews are **not re-parsed in Silver**.
 
 ---
 
-## Bronze Row Counts
+## Completed: Silver layer
 
-Final validated row counts:
+The Silver layer applies explicit data contracts and controlled transformations while retaining source information and stable keys.
 
-| Table | Rows |
+### Key transformations
+
+- **ZIP codes:** represent ZIP prefixes as five-character strings. Numeric inference in Bronze had dropped leading zeros; Silver restores the normalized width for customers, sellers, and geolocation.
+- **Geolocation:** remove **261,831 exact duplicate source rows**, select a dominant state/city, and choose a representative observed coordinate near the ZIP-level median of valid observations. Preserve coverage/conflict indicators and keep invalid coordinates as null.
+- **Orders:** normalize status and timestamps without filtering canceled or undelivered orders.
+- **Order Items and Payments:** preserve each entity's composite key and use `DECIMAL(18,2)` for monetary fields. Avoid joining two one-to-many child tables without aggregation.
+- **Products:** preserve missing attributes and standardize the source column spellings `product_name_lenght` → `product_name_length` and `product_description_lenght` → `product_description_length`.
+- **Category Translation:** preserve all 71 mappings and explicitly retain products with missing or untranslated categories.
+- **Reviews:** preserve comment text **character-for-character**, including quotes and line breaks; keep review-level cardinality and both review timestamps.
+
+The Silver implementation intentionally avoids deriving ML labels, removing source anomalies automatically, or implementing dashboard-specific aggregations.
+
+### Individual and integrated validation
+
+The nine Silver tables were written and individually checked for relevant row counts, keys, data types, referential integrity, numerical consistency, and/or record-level equivalence. The integrated `07_silver_validation` run reported:
+
+| Outcome | Count |
 |---|---:|
-| br_customers | 99,441 |
-| br_geolocation | 1,000,163 |
-| br_order_items | 112,650 |
-| br_orders | 99,441 |
-| br_payments | 103,886 |
-| br_product_category_translation | 71 |
-| br_products | 32,951 |
-| br_reviews | 99,224 |
-| br_sellers | 3,095 |
+| PASS | **69** |
+| WARN | **14** |
+| FAIL | **0** |
+| Total | **83** |
 
-All source-to-Bronze reconciliations completed successfully with:
+**Final result: `PASS WITH WARNINGS`.** Warnings below remain visible by design rather than being silently dropped or overwritten.
 
-```text
-row_count_difference = 0
-status = PASS
-```
+### Documented data-quality warnings
 
----
+| Domain | Observed issue | Count |
+|---|---|---:|
+| Orders | Carrier timestamp after customer delivery | 23 |
+| Orders | Delivered orders missing actual delivery date | 8 |
+| Payments | Order-level payment vs. item/freight amount mismatch | 303 |
+| Payments | Orders with items but no payment records | 1 |
+| Payments | Orders with payments but no item records | 775 |
+| Payments | Zero installment count | 2 |
+| Payments | Zero-value payments | 9 |
+| Products | Products missing category | 610 |
+| Products | Products with category lacking translation | 13 |
+| Customers | Customer rows without ZIP match in Silver Geolocation | 278 |
+| Geolocation | ZIP prefixes with city variation | 8,555 |
+| Geolocation | ZIP prefixes without usable representative coordinates | 4 |
+| Geolocation | ZIP prefixes with conflicting states | 8 |
+| Sellers | Seller rows without ZIP match in Silver Geolocation | 7 |
 
-## Data Quality Highlights
+**Interpretation notes:** The 278 and 7 geolocation gaps refer to **customer/seller rows**, not necessarily distinct ZIP prefixes. Four additional geolocation ZIP prefixes exist but do not have valid coordinates. There are **19,015 unique ZIP prefixes** in Silver, of which **19,011 have representative coordinates**.
 
-Several data quality and modeling characteristics were identified during Bronze validation.
+Product category translation gaps consist of `portateis_cozinha_e_preparadores_de_alimentos` (10 products) and `pc_gamer` (3 products). The 303 amount mismatches are observed after independently aggregating payments and item/freight values per order; **299 mismatches are on delivered orders**, so they cannot be attributed solely to cancellations. These checks are diagnostic and do not justify rewriting the source records.
 
-### Orders
+### Serverless compatibility
 
-`order_id` is unique and contains no null values.
-
-```text
-1 row = 1 order
-```
-
----
-
-### Customers
-
-The dataset contains:
-
-```text
-99,441 distinct customer_id
-96,096 distinct customer_unique_id
-```
-
-Olist assigns a different `customer_id` to each order.
-
-The `customer_unique_id` identifies the same customer across multiple purchases and will later support customer repurchase analysis.
+Databricks Free Edition Serverless did not support explicit DataFrame `persist()` in the environment used for this project. Silver transformations were adapted not to depend on `persist()`, `cache()`, or `unpersist()`.
 
 ---
 
-### Order Items
+## Databricks notebooks and execution responsibilities
 
-The validated composite key is:
+| Notebook | Purpose | Suggested execution |
+|---|---|---|
+| `00_setup_environment` | Create catalog, schemas, and raw Volume | Initial setup / manual |
+| `01_source_profiling` | Inspect raw CSV schema and source-specific parsing | Exploration / manual |
+| `02_bronze_ingestion` | Ingest nine CSV sources to Bronze Delta | Pipeline step |
+| `03_bronze_validation` | Reconcile source and Bronze, validate ingestion metadata | Quality gate |
+| `04_bronze_data_quality` | Inspect source keys, relationships, duplicates, and cardinality | Exploration / manual |
+| `05_silver_source_assessment` | Assess actual types, ZIP formats, geolocation conflicts, and category coverage | Exploration / manual |
+| `06_silver_transformations` | Build the nine conformed Silver Delta tables | Pipeline step |
+| `07_silver_validation` | Validate inventory, schemas, keys, relationships, and quality | Quality gate |
+
+**Refactoring note:** To avoid running exploratory diagnostics during every pipeline execution, revised versions of notebooks `02`, `06`, and `07` were prepared. The revised `06` contains **15 code cells plus an introductory Markdown cell**, reduced from **52 code cells**. The revised `07` adds **13 numerical-fidelity checks** (for **96 planned checks in total**). **The 96-check revision has not yet been confirmed as executed**, so the validated result remains **83 checks: 69 PASS, 14 WARN, 0 FAIL**. Any imported revision should be rerun before claiming operational equivalence.
+
+A future workflow may run the stages in this order:
 
 ```text
-order_id + order_item_id
+02_bronze_ingestion
+   -> 03_bronze_validation
+   -> 06_silver_transformations
+   -> 07_silver_validation
 ```
 
-A single order can contain multiple items.
-
-```text
-1 order
-   ↓
-N order_items
-```
+This is a **recommended workflow design**, not a claim that a Databricks Job has already been created or deployed. The current full-load approach overwrites tables individually; it does not offer a single transaction or automatic rollback spanning all nine tables.
 
 ---
 
-### Payments
+## Next phase: SQL-first Gold modeling
 
-The validated composite key is:
+**Gold has not been implemented.** The next task is to design the business-facing model: agree on fact/dimension grain, relationship cardinalities, KPI definitions, time semantics, conformed dimensions, and treatment of missing/unmapped data before writing transformations.
 
-```text
-order_id + payment_sequential
-```
+The Gold implementation will prioritize **Spark SQL / Databricks SQL** for joins, aggregation, window functions, CTEs, dimensional transformations, and Delta table materialization. The repository will include **actual `.sql` source files**, in addition to notebooks and PySpark orchestration where useful, so SQL is both maintainable and visible as a language in GitHub's source-language statistics. GitHub percentages will depend on the committed files and language detection.
 
-A single order can contain multiple payment records.
+Key modeling safeguards:
 
----
+- Preserve the difference between **99,441 order-associated customer IDs** and **96,096 unique consumers**.
+- Preserve `order_id` as a business key and resolve one-to-many relationships before creating order-grain facts.
+- Define payment measures and product/freight value measures separately; do not treat their totals as universally identical.
+- Avoid multiplying order totals by joining order items, payments, and reviews directly at incompatible grains.
+- Use appropriate missing-location handling before distance-based features or maps.
+- Define delivery lateness and eligibility carefully; do not treat a missing delivery date as automatically on-time or late.
+- Keep delivery prediction features free of post-event customer reviews and actual delivery outcomes.
 
-### Reviews
-
-Customer reviews required special handling during ingestion.
-
-The original CSV contains:
-
-- multiline review comments;
-- embedded quotation marks;
-- long free-text fields.
-
-Without source-specific parsing, parts of customer comments were incorrectly interpreted as new CSV records.
-
-The final parsing configuration uses:
-
-```text
-multiLine = true
-quote = "
-escape = "
-unescapedQuoteHandling = BACK_TO_DELIMITER
-```
-
-After correcting the parser, the final validation produced:
-
-```text
-Rows:                         99,224
-Null review IDs:                   0
-Null order IDs:                    0
-Invalid review ID formats:         0
-Invalid order ID formats:          0
-Invalid review scores:             0
-Orphan reviews:                    0
-```
-
-A known multiline review was also explicitly validated to ensure the complete comment remained inside a single record.
+No Gold fact or dimension names are final yet.
 
 ---
 
-### Review Granularity
+## Future roadmap
 
-`review_id` alone is not unique.
+### Machine Learning — not started
 
-The following candidate composite key was validated successfully:
+**Delivery Delay Prediction** will use a one-row-per-order feature dataset with an explicit prediction moment and eligibility criteria. Candidate features include seller/customer region, number of items and sellers, freight and order values, product attributes, approximate geographic distance, and purchase/date characteristics.
 
-```text
-review_id + order_id
-```
+The label will use the actual delivery outcome and promised date **only in training/evaluation**, never as predictive input. Modeling will favor a **time-based train/test split**, starting with Logistic Regression and comparing with Random Forest using Spark ML. Planned tracking: MLflow. Planned metrics: Precision, Recall for late deliveries, F1, ROC-AUC, PR-AUC, and confusion matrix.
 
-It contains:
+### AI / LLM review analysis — not started
 
-```text
-0 null key rows
-0 duplicate key groups
-```
+A separate future workflow will classify feedback sentiment (positive, negative, neutral, mixed) and categories such as delivery delay, damaged product, wrong product, product quality, or customer service. AI tool usage will depend on actual free-tier availability. Review data must not leak into pre-delivery prediction features.
 
-Additionally:
+### Power BI — not started
 
-```text
-547 orders
-```
-
-contain multiple review records.
-
-This means future analytical models must not assume a strict one-to-one relationship between orders and reviews.
+Power BI Desktop will be the analytics frontend, likely using Import Mode for this historical dataset. Potential pages: **Executive Overview**, **Delivery Intelligence**, **Customer Intelligence**, and **ML Performance**. Connectivity and free-tier constraints will be verified before choosing an ingestion method.
 
 ---
 
-### Geolocation
-
-The geolocation source contains:
-
-```text
-1,000,163 rows
-19,015 distinct ZIP code prefixes
-261,831 exact duplicate rows
-```
-
-Therefore:
-
-```text
-geolocation_zip_code_prefix
-```
-
-is not unique.
-
-This finding will directly influence the Silver-layer design.
-
-A representative location per ZIP code prefix will need to be created before joining geolocation data with customers or sellers.
-
----
-
-### Product Categories
-
-Among the product records:
-
-```text
-610 products
-```
-
-do not contain a product category.
-
-Additionally:
-
-```text
-13 category records
-```
-
-do not find a corresponding English translation.
-
-These records are preserved in Bronze and will be handled explicitly in the Silver layer instead of being silently removed.
-
----
-
-## Referential Integrity
-
-The following relationships were validated with zero orphan records:
-
-```text
-orders → customers
-
-order_items → orders
-
-payments → orders
-
-reviews → orders
-
-order_items → products
-
-order_items → sellers
-```
-
-Product category translation contains known source-level gaps that will be handled downstream.
-
----
-
-## Repository Structure
-
-Current repository structure:
-
-```text
-commerce-ai-databricks-lakehouse/
-│
-├── notebooks/
-│   ├── 01_source_profiling
-│   ├── 02_bronze_ingestion
-│   ├── 03_bronze_validation
-│   └── 04_bronze_data_quality
-│
-├── README.md
-└── .gitignore
-```
-
----
-
-## Bronze Notebooks
-
-### 01 — Source Profiling
-
-Responsible for:
-
-- source configuration;
-- reusable CSV reading;
-- row and column profiling;
-- schema inspection;
-- review parsing diagnostics;
-- known multiline review validation.
-
----
-
-### 02 — Bronze Ingestion
-
-Responsible for:
-
-- source configuration;
-- source-specific parsing options;
-- reusable ingestion logic;
-- Delta table creation;
-- ingestion metadata;
-- Bronze ingestion summary.
-
----
-
-### 03 — Bronze Validation
-
-Responsible for:
-
-- source-to-Bronze reconciliation;
-- metadata column validation;
-- validation results;
-- automated validation gate.
-
----
-
-### 04 — Bronze Data Quality
-
-Responsible for:
-
-- Bronze table inventory;
-- key validation;
-- null profiling;
-- referential integrity;
-- geolocation analysis;
-- duplicate analysis;
-- categorical distributions;
-- customer identity analysis;
-- review structural validation;
-- review cardinality analysis;
-- data quality summary.
-
----
-
-## Machine Learning Roadmap
-
-A future Machine Learning pipeline will predict whether an order is likely to be delivered after its promised delivery date.
-
-The initial use case will be:
-
-```text
-Delivery Delay Prediction
-```
-
-The target will be derived from:
-
-```text
-order_delivered_customer_date
->
-order_estimated_delivery_date
-```
-
-Potential features include:
-
-- customer location;
-- seller location;
-- seller-to-customer distance;
-- number of items;
-- number of sellers;
-- product value;
-- freight value;
-- product weight;
-- product dimensions;
-- purchase date features;
-- promised delivery time.
-
-The initial models planned are:
-
-```text
-Logistic Regression
-Random Forest
-```
-
-Experiments will be tracked using MLflow.
-
----
-
-## AI / LLM Roadmap
-
-Customer review text will be processed separately from the delivery prediction model.
-
-Potential AI use cases include:
-
-```text
-Sentiment Classification
-
-POSITIVE
-NEGATIVE
-NEUTRAL
-MIXED
-```
-
-and:
-
-```text
-Feedback Classification
-
-DELIVERY_DELAY
-DAMAGED_PRODUCT
-WRONG_PRODUCT
-PRODUCT_QUALITY
-CUSTOMER_SERVICE
-OTHER
-```
-
-Reviews will not be used as delivery prediction features because they occur after the purchase and could introduce data leakage.
-
----
-
-## Power BI Roadmap
-
-Power BI will be used as the analytical frontend.
-
-Planned dashboard areas include:
-
-```text
-Executive Overview
-Delivery Intelligence
-ML Performance
-Customer Intelligence
-```
-
-The project will favor performing heavy transformations in Databricks and exposing business-ready Gold tables to Power BI.
-
----
-
-## Next Steps
-
-The next development phase is the **Silver layer**.
-
-Planned topics include:
-
-- data type enforcement;
-- text normalization;
-- geolocation consolidation;
-- customer normalization;
-- seller normalization;
-- product category enrichment;
-- review granularity treatment;
-- preparation for analytical modeling.
-
-Future stages:
-
-```text
-Bronze ✅
-   ↓
-Silver
-   ↓
-Gold
-   ↓
-Machine Learning
-   ↓
-Generative AI
-   ↓
-Power BI
-```
-
----
-
-## Project Status
-
-```text
-Bronze        ██████████  Completed
-Silver        ░░░░░░░░░░  Planned
-Gold          ░░░░░░░░░░  Planned
-ML            ░░░░░░░░░░  Planned
-AI / LLM      ░░░░░░░░░░  Planned
-Power BI      ░░░░░░░░░░  Planned
-```
+## Reproducibility and project status
+
+Raw Olist files must be obtained from the cited dataset and uploaded to the declared Unity Catalog Volume. Notebooks assume the `commerceai` catalog and schema names shown above. The raw CSV files are intentionally excluded from version control.
+
+| Stage | Status |
+|---|---|
+| Raw ingestion & Bronze | ✅ Completed |
+| Bronze validation & source data quality | ✅ Completed |
+| Silver transformations (9 tables) | ✅ Completed |
+| Silver integrated validation | ✅ Completed with 14 documented warnings |
+| Refactored notebook revalidation | ⏳ Pending confirmation |
+| SQL-first Gold dimensional model | ⏳ Not started |
+| Delivery Delay Prediction / MLflow | ⏳ Not started |
+| Review AI / LLM | ⏳ Not started |
+| Power BI dashboard | ⏳ Not started |
+
+*CommerceAI is an ongoing portfolio project. This README distinguishes completed, validated work from planned functionality and documents known data limitations rather than hiding them.*
