@@ -1,57 +1,47 @@
-# CommerceAI | Gold Layer — Step 01
+# CommerceAI | Gold Layer — Dimensions
 
-## Purpose
+## Status
 
-Build and validate the first Gold dimension (`commerceai.gold.dim_date`) using Spark SQL stored as a first-class `.sql` artifact.
+- `commerceai.gold.dim_date`: built and validated in Databricks on 2026-10-18 (1,827 rows, 7 PASS, 0 FAIL).
+- `commerceai.gold.dim_customer`: SQL and notebooks prepared; execution and validation pending.
+- `commerceai.gold.dim_date`: full-calendar years 2016–2020. The Silver `shipping_limit_date` has a documented maximum of `2020-04-09`; this explains why the calendar extends beyond the purchase period.
+- `commerceai.ml` and the Gold fact tables are not implemented.
 
 ## Repository layout
 
 ```text
 notebooks/03_gold/08_gold_dimensions.ipynb
 notebooks/03_gold/10_gold_validation.ipynb
-sql/gold/01_dim_date.sql
-sql/validation/01_dim_date_checks.sql
-docs/gold/README.md
+sql/gold/01_dim_date.sql                  # Existing, unchanged
+sql/gold/02_dim_customer.sql              # New
+sql/validation/01_dim_date_checks.sql      # Existing, unchanged
+sql/validation/02_dim_customer_checks.sql  # New
+docs/gold/README.md                        # This file
 ```
 
-The root repository `README.md` is **not** replaced by this document.
+## Customer dimension contract
 
-## Input contracts
+- **Grain:** exactly one row per `customer_id`.
+- **Primary/business key:** `customer_id`.
+- **Consumer identity:** `customer_unique_id` is not unique in the dimension and is retained to support repeat-purchase analysis after joining to orders.
+- **Inputs:** `commerceai.silver.sl_customers` and `commerceai.silver.sl_geolocation`.
+- **Join:** `LEFT JOIN` by five-character ZIP prefix; `sl_geolocation` is one record per ZIP prefix.
+- **Source customer attributes:** preserved without overwriting `customer_city` or `customer_state` using geographic reference values.
+- **Geo attributes:** `geolocation_lat`, `geolocation_lng`, `reference_geolocation_city`, `reference_geolocation_state`, nullable geography quality flags, plus explicit match and coordinate availability indicators.
+- **Known reference gap:** 278 Silver customer records lack geolocation matches. These are retained with `has_geolocation_match = FALSE` and `geolocation_coordinate_status = 'NOT_FOUND'`. A matched ZIP with missing coordinates is represented with status `MISSING` instead, preserving the distinction.
+- **Historically observed counts:** 99,441 `customer_id` records and 96,096 unique `customer_unique_id` values. The validation SQL compares with current Silver dynamically rather than requiring fixed numbers.
+- **Load strategy:** `CREATE OR REPLACE TABLE ... USING DELTA AS SELECT`, full rebuild, no artificial unknown ZIPs or inferred coordinates.
+- **Historical tracking:** SCD Type 2 is not implemented for this static-source project.
 
-- `commerceai.silver.sl_orders`
-- `commerceai.silver.sl_order_items`
-- `commerceai.silver.sl_reviews`
+## Step 02 setup
 
-## Outputs
+1. Place `02_dim_customer.sql` under `<repo root>/sql/gold/` and `02_dim_customer_checks.sql` under `<repo root>/sql/validation/` as **files**, not Databricks notebook objects.
+2. Replace the existing `08_gold_dimensions` and `10_gold_validation` notebooks under `<repo root>/notebooks/03_gold/` using the updated notebooks in the patch package. Original date build and validation cells are retained.
+3. Optionally update `docs/gold/README.md` with this file. Keep the root `README.md` unchanged.
+4. In notebook 08, execute **only cell 04** to build the new customer dimension; use cell 05 to preview it. No need to rebuild `dim_date` just for this step.
+5. Run **both cells** in notebook 10 to validate both dimensions. Expect 7 date checks and 9 customer checks, not a single precomputed result.
+6. If a customer check fails, inspect its observed and expected values. Do not automatically modify Silver or delete customer records.
 
-- `commerceai.gold.dim_date`: one row per calendar date, from January 1 of the earliest source event year to December 31 of the latest source event year.
+## Code organization
 
-## Setup
-
-1. Create the `sql/gold` and `sql/validation` directories at the **repository root**, alongside `notebooks`, not inside `notebooks/03_gold`.
-2. Place each SQL file in its corresponding directory as a plain `.sql` workspace file.
-3. Import the two notebooks into `notebooks/03_gold`.
-4. Confirm that `PROJECT_ROOT` in both notebooks points to the repository's actual workspace folder. The supplied notebooks are configured for the original author's Databricks workspace and should be adapted when cloned by someone else.
-5. Run `08_gold_dimensions`, then `10_gold_validation`. `09_gold_facts` will be added later; it is not a dependency of date-dimension validation.
-
-## Code ownership and execution
-
-- SQL is the canonical transformation and validation logic.
-- Python only reads and executes SQL files using `spark.sql`.
-- Validation is separate from construction.
-- Markdown headings precede code cells so the titles remain visible even when Databricks does not display notebook-specific cell-title metadata. Native UI cell titles can also be added using **Add title**.
-
-## Time zone and calendar semantics
-
-The Gold calendar applies `TO_DATE()` to source timestamps in the active Spark session time zone; no conversion is applied. For reproducibility, review the time zone and keep it consistent between relevant Silver and Gold runs.
-
-## Validation
-
-`10_gold_validation` runs seven independent SQL checks: non-empty dimension, unique date key, non-null date/key, no calendar gaps, full-year coverage, matching date key, and weekday consistency. Stop and investigate if any check fails.
-
-## Project status
-
-- Bronze: completed
-- Silver: completed, last confirmed gate 83 checks (69 PASS, 14 WARN, 0 FAIL)
-- Gold: Step 01 code prepared; Databricks execution not confirmed
-- ML, AI/LLM, Power BI: not started
+The `.sql` files are the canonical transformations and validation contracts; notebook Python only loads the appropriate SQL files and prints results. Native Databricks cell title metadata and Markdown titles are included for each code cell.
