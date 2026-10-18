@@ -6,15 +6,15 @@
 # MAGIC %md
 # MAGIC # 08 - Gold Dimensions
 # MAGIC
-# MAGIC **Purpose:** Build conformed Gold dimensions using version-controlled Spark SQL files.
+# MAGIC **Purpose:** Build conformed Gold dimensions with SQL-first, version-controlled transformation files.
 # MAGIC
-# MAGIC **Inputs:** `commerceai.silver.sl_orders`, `commerceai.silver.sl_order_items`, and `commerceai.silver.sl_reviews` for the first date-dimension build.
+# MAGIC **Inputs:** `commerceai.silver.sl_orders`, `commerceai.silver.sl_order_items`, `commerceai.silver.sl_reviews`, `commerceai.silver.sl_customers`, and `commerceai.silver.sl_geolocation`; SQL files in `sql/gold/`.
 # MAGIC
-# MAGIC **Outputs:** `commerceai.gold.dim_date` (one row per calendar date).
+# MAGIC **Outputs:** `commerceai.gold.dim_date` (one row per calendar date) and `commerceai.gold.dim_customer` (one row per `customer_id`).
 # MAGIC
-# MAGIC **Main Responsibilities:** Review the session time zone, load the canonical `.sql` source file from the project repository, and execute it without duplicating business logic in Python.
+# MAGIC **Main Responsibilities:** Inspect the session time zone; run external `.sql` builds via `spark.sql(...)`; keep customer identity and missing geolocation intact; present small previews. Business transformations remain in `.sql` files.
 # MAGIC
-# MAGIC **Execution/Validation Notes:** Set `PROJECT_ROOT` to the absolute Databricks workspace path of this repository. Run this notebook before `10_gold_validation`. The date range is derived from source event dates and includes entire calendar years. Time-zone interpretation must remain consistent with Silver; no time-zone conversion is performed here. Additional dimensions will be added in later steps.
+# MAGIC **Execution/Validation Notes:** `PROJECT_ROOT` is the absolute Databricks workspace path of this repository. The SQL files must exist in `sql/gold/` at the repository root. To build only the new customer dimension, run cell 04; to rebuild all currently implemented dimensions, run cells 01–05. Run `10_gold_validation` separately after building. No timezone conversion is applied to source timestamps. Both builds use full replacement of the target Delta table.
 # MAGIC
 
 # COMMAND ----------
@@ -25,7 +25,12 @@
 
 # COMMAND ----------
 
-# DBTITLE 1,02 - Build Date Dimension From SQL File
+# MAGIC %md
+# MAGIC ## Build Date Dimension From SQL File
+
+# COMMAND ----------
+
+# DBTITLE 1,01 - Build Date Dimension From SQL File
 from pathlib import Path
 
 # Set the absolute path to your CommerceAI Git/workspace folder.
@@ -40,9 +45,51 @@ print("Gold date dimension SQL executed: commerceai.gold.dim_date")
 
 # COMMAND ----------
 
-# DBTITLE 1,03 - Preview Date Dimension
+# DBTITLE 1,02 - Preview Date Dimension
 # MAGIC %sql
 # MAGIC SELECT date_key, full_date, year_number, month_name, iso_week_number, iso_week_year, is_weekend
 # MAGIC FROM commerceai.gold.dim_date
 # MAGIC ORDER BY full_date
 # MAGIC LIMIT 10;
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Build Customer Dimension From SQL File
+# MAGIC
+
+# COMMAND ----------
+
+# DBTITLE 1,03 - Build Customer Dimension From SQL File
+from pathlib import Path
+
+PROJECT_ROOT = Path(
+    "/Workspace/Users/jonathan.bonfim.data@gmail.com/commerce-ai-databricks-lakehouse"
+)
+sql_file = PROJECT_ROOT / "sql" / "gold" / "02_dim_customer.sql"
+
+if not sql_file.is_file():
+    raise FileNotFoundError(f"SQL file not found: {sql_file}")
+
+spark.sql(sql_file.read_text(encoding="utf-8"))
+print("Gold customer dimension SQL executed: commerceai.gold.dim_customer")
+
+
+# COMMAND ----------
+
+# DBTITLE 1,04 - Preview Customer Dimension
+display(
+    spark.sql("""
+        SELECT
+            customer_id,
+            customer_unique_id,
+            customer_state,
+            customer_zip_code_prefix,
+            has_geolocation_match,
+            has_geolocation_coordinates,
+            geolocation_coordinate_status
+        FROM commerceai.gold.dim_customer
+        ORDER BY customer_id
+        LIMIT 10
+    """)
+)
