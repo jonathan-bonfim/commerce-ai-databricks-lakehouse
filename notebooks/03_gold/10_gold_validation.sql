@@ -8,11 +8,11 @@
 -- MAGIC
 -- MAGIC **Purpose:** Validate Gold dimensions using pure Spark SQL and stop execution when a contract fails.
 -- MAGIC
--- MAGIC **Inputs:** `commerceai.gold.dim_date`, `commerceai.gold.dim_customer`, and their Silver source tables.
+-- MAGIC **Inputs:** `commerceai.gold.dim_date`, `commerceai.gold.dim_customer`, `commerceai.gold.dim_product`, and their Silver source tables.
 -- MAGIC
 -- MAGIC **Outputs:** Session-scoped validation views and visible quality-check tables; no persisted Gold validation datasets.
 -- MAGIC
--- MAGIC **Main Responsibilities:** Preserve seven date and nine customer validation contracts; report results; apply SQL failure gates with `assert_true`.
+-- MAGIC **Main Responsibilities:** Preserve seven date and nine customer validation contracts, add eight product contracts, report results, and apply SQL failure gates with `assert_true`.
 -- MAGIC
 -- MAGIC **Execution/Validation Notes:** Run independently after building Gold dimensions. Each `CREATE TEMP VIEW` computes checks lazily and uses the current session. `assert_true` must be evaluated in the following gate cells; a non-PASS check should fail the notebook/job. No external `.sql` files or Python cells required.
 
@@ -368,3 +368,193 @@ SELECT
         'Gold customer dimension validation failed. Review the preceding checks.'
     ) AS validation_gate
 FROM gold_customer_validation_results;
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## 07 - Prepare Product Dimension Validation Checks
+
+-- COMMAND ----------
+
+-- DBTITLE 1,07 - Prepare Product Dimension Validation Checks
+CREATE OR REPLACE TEMP VIEW gold_product_validation_results AS
+-- CommerceAI | Gold product dimension validation
+-- Grain: one row per product_id.
+-- Missing product categories and untranslated product categories are distinct.
+-- Baselines in Silver: 32,951 products; 610 without category;
+-- 13 with a category name but no matching English translation.
+-- Comparisons use current Silver values rather than fixed hard-coded counts.
+WITH source_stats AS (
+    SELECT
+        COUNT(*) AS source_rows,
+        COUNT_IF(product_category_name IS NULL) AS source_missing_category_rows
+    FROM commerceai.silver.sl_products
+),
+source_translation_stats AS (
+    SELECT
+        COUNT_IF(
+            p.product_category_name IS NOT NULL
+            AND t.product_category_name_english IS NULL
+        ) AS source_untranslated_rows
+    FROM commerceai.silver.sl_products AS p
+    LEFT JOIN commerceai.silver.sl_product_category_translation AS t
+        ON p.product_category_name = t.product_category_name
+),
+gold_stats AS (
+    SELECT
+        COUNT(*) AS gold_rows,
+        COUNT(DISTINCT product_id) AS distinct_product_ids,
+        COUNT_IF(product_id IS NULL) AS null_product_ids,
+        COUNT_IF(product_category_name IS NULL) AS gold_missing_category_rows,
+        COUNT_IF(product_category_status = 'UNTRANSLATED') AS gold_untranslated_rows,
+        COUNT_IF(
+            NOT (
+                product_category_status <=>
+                CASE
+                    WHEN product_category_name IS NULL THEN 'MISSING_CATEGORY'
+                    WHEN product_category_name_english IS NULL THEN 'UNTRANSLATED'
+                    ELSE 'TRANSLATED'
+                END
+            )
+        ) AS invalid_category_status_rows
+    FROM commerceai.gold.dim_product
+),
+extra_gold_keys AS (
+    SELECT COUNT(*) AS issue_count
+    FROM commerceai.gold.dim_product AS d
+    LEFT ANTI JOIN commerceai.silver.sl_products AS p
+        ON d.product_id = p.product_id
+),
+product_attribute_issues AS (
+    SELECT COUNT(*) AS issue_count
+    FROM commerceai.gold.dim_product AS d
+    INNER JOIN commerceai.silver.sl_products AS p
+        ON d.product_id = p.product_id
+    WHERE NOT (
+        (d.product_category_name <=> p.product_category_name)
+        AND (d.product_name_length <=> p.product_name_length)
+        AND (d.product_description_length <=> p.product_description_length)
+        AND (d.product_photos_qty <=> p.product_photos_qty)
+        AND (d.product_weight_g <=> p.product_weight_g)
+        AND (d.product_length_cm <=> p.product_length_cm)
+        AND (d.product_height_cm <=> p.product_height_cm)
+        AND (d.product_width_cm <=> p.product_width_cm)
+    )
+),
+translation_attribute_issues AS (
+    SELECT COUNT(*) AS issue_count
+    FROM commerceai.gold.dim_product AS d
+    INNER JOIN commerceai.silver.sl_products AS p
+        ON d.product_id = p.product_id
+    LEFT JOIN commerceai.silver.sl_product_category_translation AS t
+        ON p.product_category_name = t.product_category_name
+    WHERE NOT (
+        d.product_category_name_english <=> t.product_category_name_english
+    )
+),
+checks AS (
+    SELECT
+        'row_count_matches_silver' AS check_name,
+        CAST(s.source_rows AS STRING) AS expected_value,
+        CAST(g.gold_rows AS STRING) AS observed_value,
+        IF(s.source_rows = g.gold_rows, 'PASS', 'FAIL') AS status
+    FROM source_stats AS s CROSS JOIN gold_stats AS g
+
+    UNION ALL
+    SELECT
+        'product_id_is_not_null_and_unique',
+        '0 null keys and one unique key per row',
+        CONCAT('null=', CAST(g.null_product_ids AS STRING),
+               ', distinct=', CAST(g.distinct_product_ids AS STRING),
+               ', rows=', CAST(g.gold_rows AS STRING)),
+        IF(g.null_product_ids = 0 AND g.distinct_product_ids = g.gold_rows, 'PASS', 'FAIL')
+    FROM gold_stats AS g
+
+    UNION ALL
+    SELECT
+        'no_extra_product_ids',
+        '0',
+        CAST(k.issue_count AS STRING),
+        IF(k.issue_count = 0, 'PASS', 'FAIL')
+    FROM extra_gold_keys AS k
+
+    UNION ALL
+    SELECT
+        'source_product_attributes_preserved',
+        '0',
+        CAST(a.issue_count AS STRING),
+        IF(a.issue_count = 0, 'PASS', 'FAIL')
+    FROM product_attribute_issues AS a
+
+    UNION ALL
+    SELECT
+        'category_translation_matches_silver',
+        '0',
+        CAST(t.issue_count AS STRING),
+        IF(t.issue_count = 0, 'PASS', 'FAIL')
+    FROM translation_attribute_issues AS t
+
+    UNION ALL
+    SELECT
+        'missing_category_products_preserved',
+        CAST(s.source_missing_category_rows AS STRING),
+        CAST(g.gold_missing_category_rows AS STRING),
+        IF(s.source_missing_category_rows = g.gold_missing_category_rows, 'PASS', 'FAIL')
+    FROM source_stats AS s CROSS JOIN gold_stats AS g
+
+    UNION ALL
+    SELECT
+        'untranslated_category_products_preserved',
+        CAST(s.source_untranslated_rows AS STRING),
+        CAST(g.gold_untranslated_rows AS STRING),
+        IF(s.source_untranslated_rows = g.gold_untranslated_rows, 'PASS', 'FAIL')
+    FROM source_translation_stats AS s CROSS JOIN gold_stats AS g
+
+    UNION ALL
+    SELECT
+        'category_status_is_consistent',
+        '0',
+        CAST(g.invalid_category_status_rows AS STRING),
+        IF(g.invalid_category_status_rows = 0, 'PASS', 'FAIL')
+    FROM gold_stats AS g
+)
+SELECT
+    check_name,
+    expected_value,
+    observed_value,
+    status
+FROM checks;
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## 08 - Review Product Dimension Validation Results
+
+-- COMMAND ----------
+
+-- DBTITLE 1,08 - Review Product Dimension Validation Results
+SELECT
+    check_name,
+    expected_value,
+    observed_value,
+    status
+FROM gold_product_validation_results
+ORDER BY check_name;
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## 09 - Enforce Product Dimension Quality Gate
+
+-- COMMAND ----------
+
+-- DBTITLE 1,09 - Enforce Product Dimension Quality Gate
+SELECT
+    COUNT(*) AS total_checks,
+    COUNT_IF(status = 'PASS') AS passed_checks,
+    COUNT(*) - COUNT_IF(status = 'PASS') AS failed_checks,
+    ASSERT_TRUE(
+        COUNT(*) = 8 AND COUNT_IF(status = 'PASS') = 8,
+        'Gold product dimension validation failed. Review the preceding checks.'
+    ) AS validation_gate
+FROM gold_product_validation_results;
