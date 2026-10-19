@@ -8,13 +8,13 @@
 # MAGIC
 # MAGIC **Purpose:** Build conformed Gold dimensions using Spark SQL embedded directly in Python notebook cells.
 # MAGIC
-# MAGIC **Inputs:** `commerceai.silver.sl_orders`, `commerceai.silver.sl_order_items`, `commerceai.silver.sl_reviews`, `commerceai.silver.sl_customers`, and `commerceai.silver.sl_geolocation`.
+# MAGIC **Inputs:** `commerceai.silver.sl_orders`, `commerceai.silver.sl_order_items`, `commerceai.silver.sl_reviews`, `commerceai.silver.sl_customers`, `commerceai.silver.sl_geolocation`, `commerceai.silver.sl_products`, and `commerceai.silver.sl_product_category_translation`.
 # MAGIC
-# MAGIC **Outputs:** `commerceai.gold.dim_date` (one record per calendar date) and `commerceai.gold.dim_customer` (one record per `customer_id`).
+# MAGIC **Outputs:** `commerceai.gold.dim_date` (one record per calendar date), `commerceai.gold.dim_customer` (one record per `customer_id`), and `commerceai.gold.dim_product` (one record per `product_id`).
 # MAGIC
-# MAGIC **Main Responsibilities:** Execute self-contained Delta table builds with `spark.sql(...)`; preserve consumer identity, source attributes, and missing geolocation; present lightweight previews. No external SQL file paths are required.
+# MAGIC **Main Responsibilities:** Build Gold Delta dimensions with SQL embedded in `spark.sql(...)`; preserve original product attributes and missing/untranslated categories; preserve customer identities and optional geolocation. SQL is maintained directly in this notebook, without dependencies on external SQL files.
 # MAGIC
-# MAGIC **Execution/Validation Notes:** Builds use full `CREATE OR REPLACE TABLE` statements. Execute only the target build cell for incremental development, or run this notebook to rebuild both dimensions. Use `10_gold_validation` independently as the Gold quality gate. Source timestamps are cast with the active session time zone, without an arbitrary source time-zone conversion. Changes to the orchestration format do not require source Bronze/Silver changes.
+# MAGIC **Execution/Validation Notes:** Builds use `CREATE OR REPLACE TABLE` (full rebuild). For Step 03, execute only **06 - Build Product Dimension With Embedded SQL** and **07 - Preview Product Dimension**, because the date/customer dimensions have already passed validation. Run `10_gold_validation.sql` independently to validate all three dimensions. No Silver changes, product null imputation, or product-volume feature engineering are performed here.
 
 # COMMAND ----------
 
@@ -30,7 +30,7 @@ display(spark.sql("SELECT current_timezone() AS session_time_zone"))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 02 - Build Date Dimension
+# MAGIC ## 02 - Build Date Dimension With Embedded SQL
 
 # COMMAND ----------
 
@@ -155,7 +155,7 @@ LIMIT 10
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 04 - Build Customer Dimension
+# MAGIC ## 04 - Build Customer Dimension With Embedded SQL
 
 # COMMAND ----------
 
@@ -220,5 +220,70 @@ SELECT
     geolocation_coordinate_status
 FROM commerceai.gold.dim_customer
 ORDER BY customer_id
+LIMIT 10
+"""))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 06 - Build Product Dimension With Embedded SQL
+
+# COMMAND ----------
+
+# DBTITLE 1,06 - Build Product Dimension With Embedded SQL
+# Grain: one row per product_id. Preserve nullable product attributes and translation gaps.
+spark.sql("""
+-- CommerceAI | Gold product dimension
+-- Grain: exactly one row per product_id.
+-- Product attributes remain faithful to Silver, including NULL and zero values.
+-- Missing category and missing English translation are distinct statuses.
+-- A LEFT JOIN to the unique translation key does not discard source products.
+
+CREATE OR REPLACE TABLE commerceai.gold.dim_product
+USING DELTA
+COMMENT 'Product dimension at product_id grain with original product attributes and nullable English category translation.'
+AS
+SELECT
+    p.product_id,
+    p.product_category_name,
+    t.product_category_name_english,
+    CASE
+        WHEN p.product_category_name IS NULL THEN 'MISSING_CATEGORY'
+        WHEN t.product_category_name_english IS NULL THEN 'UNTRANSLATED'
+        ELSE 'TRANSLATED'
+    END AS product_category_status,
+    p.product_name_length,
+    p.product_description_length,
+    p.product_photos_qty,
+    p.product_weight_g,
+    p.product_length_cm,
+    p.product_height_cm,
+    p.product_width_cm
+FROM commerceai.silver.sl_products AS p
+LEFT JOIN commerceai.silver.sl_product_category_translation AS t
+    ON p.product_category_name = t.product_category_name;
+""")
+print("Gold product dimension built: commerceai.gold.dim_product")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 07 - Preview Product Dimension
+
+# COMMAND ----------
+
+# DBTITLE 1,07 - Preview Product Dimension
+display(spark.sql("""
+SELECT
+    product_id,
+    product_category_name,
+    product_category_name_english,
+    product_category_status,
+    product_weight_g,
+    product_length_cm,
+    product_height_cm,
+    product_width_cm
+FROM commerceai.gold.dim_product
+ORDER BY product_id
 LIMIT 10
 """))
