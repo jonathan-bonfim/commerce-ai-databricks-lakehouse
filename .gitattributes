@@ -1,0 +1,3 @@
+# Include genuine Databricks SQL source notebooks in GitHub language statistics.
+*.sql linguist-language=SQL
+*.sql linguist-detectable=true
