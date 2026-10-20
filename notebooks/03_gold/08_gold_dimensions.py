@@ -10,7 +10,7 @@
 # MAGIC
 # MAGIC **Inputs:** `commerceai.silver.sl_orders`, `commerceai.silver.sl_order_items`, `commerceai.silver.sl_reviews`, `commerceai.silver.sl_customers`, `commerceai.silver.sl_geolocation`, `commerceai.silver.sl_products`, and `commerceai.silver.sl_product_category_translation`.
 # MAGIC
-# MAGIC **Outputs:** `commerceai.gold.dim_date` (one record per calendar date), `commerceai.gold.dim_customer` (one record per `customer_id`), and `commerceai.gold.dim_product` (one record per `product_id`).
+# MAGIC **Outputs:** `commerceai.gold.dim_date` (one record per calendar date), `commerceai.gold.dim_customer` (one record per `customer_id`), and `commerceai.gold.dim_product` (one record per `product_id`), `commerceai.gold.dim_sellers` (one record per `seller_id`).
 # MAGIC
 # MAGIC **Main Responsibilities:** Build Gold Delta dimensions with SQL embedded in `spark.sql(...)`; preserve original product attributes and missing/untranslated categories; preserve customer identities and optional geolocation. SQL is maintained directly in this notebook, without dependencies on external SQL files.
 # MAGIC

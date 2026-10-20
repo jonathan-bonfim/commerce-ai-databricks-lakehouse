@@ -8,7 +8,7 @@
 -- MAGIC
 -- MAGIC **Purpose:** Validate Gold dimensions using pure Spark SQL and stop execution when a contract fails.
 -- MAGIC
--- MAGIC **Inputs:** `commerceai.gold.dim_date`, `commerceai.gold.dim_customer`, `commerceai.gold.dim_product`, and their Silver source tables.
+-- MAGIC **Inputs:** `commerceai.gold.dim_date`, `commerceai.gold.dim_customer`, `commerceai.gold.dim_product`, `commerceai.gold.dim_seller` and their Silver source tables.
 -- MAGIC
 -- MAGIC **Outputs:** Session-scoped validation views and visible quality-check tables; no persisted Gold validation datasets.
 -- MAGIC
