@@ -849,3 +849,451 @@ SELECT
     ) AS validation_gate
 
 FROM gold_seller_validation_results;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,13 - Prepare Order Fact Validation Checks
+
+CREATE OR REPLACE TEMP VIEW gold_orders_validation_results AS
+
+WITH source_items AS (
+    SELECT
+        order_id,
+        COUNT(*) AS item_count,
+        COUNT(DISTINCT product_id) AS product_count,
+        COUNT(DISTINCT seller_id) AS seller_count,
+        SUM(price) AS item_value,
+        SUM(freight_value) AS freight_value,
+        SUM(price + freight_value) AS total_value
+    FROM commerceai.silver.sl_order_items
+    GROUP BY order_id
+),
+
+source_payments AS (
+    SELECT
+        order_id,
+        COUNT(*) AS payment_count,
+        SUM(payment_value) AS paid_value
+    FROM commerceai.silver.sl_payments
+    GROUP BY order_id
+),
+
+source_orders AS (
+    SELECT
+        o.order_id,
+        o.customer_id,
+        o.order_status,
+        o.order_purchase_timestamp,
+        o.order_approved_at,
+        o.order_delivered_carrier_date,
+        o.order_delivered_customer_date,
+        o.order_estimated_delivery_date,
+
+        i.order_id AS item_order_id,
+        i.item_count,
+        i.product_count,
+        i.seller_count,
+        i.item_value,
+        i.freight_value,
+        i.total_value,
+
+        p.order_id AS payment_order_id,
+        p.payment_count,
+        p.paid_value
+
+    FROM commerceai.silver.sl_orders AS o
+
+    LEFT JOIN source_items AS i
+        ON o.order_id = i.order_id
+
+    LEFT JOIN source_payments AS p
+        ON o.order_id = p.order_id
+),
+
+row_comparison AS (
+    SELECT
+        s.order_id,
+        f.order_id AS fact_order_id,
+
+        NOT (
+            (f.customer_id <=> s.customer_id)
+            AND (f.order_status <=> s.order_status)
+            AND (f.order_purchase_timestamp <=> s.order_purchase_timestamp)
+            AND (f.order_approved_at <=> s.order_approved_at)
+            AND (f.order_delivered_carrier_date <=> s.order_delivered_carrier_date)
+            AND (f.order_delivered_customer_date <=> s.order_delivered_customer_date)
+            AND (f.order_estimated_delivery_date <=> s.order_estimated_delivery_date)
+        ) AS source_attributes_mismatch,
+
+        NOT (
+            (f.has_order_items <=> (s.item_order_id IS NOT NULL))
+            AND (f.item_count <=> COALESCE(s.item_count, 0))
+            AND (f.distinct_product_count <=> COALESCE(s.product_count, 0))
+            AND (f.distinct_seller_count <=> COALESCE(s.seller_count, 0))
+            AND (f.item_value_brl <=> s.item_value)
+            AND (f.freight_value_brl <=> s.freight_value)
+            AND (f.ordered_total_value_brl <=> s.total_value)
+        ) AS item_metrics_mismatch,
+
+        NOT (
+            (f.has_payments <=> (s.payment_order_id IS NOT NULL))
+            AND (f.payment_count <=> COALESCE(s.payment_count, 0))
+            AND (f.paid_value_brl <=> s.paid_value)
+        ) AS payment_metrics_mismatch,
+
+        NOT (
+            (
+                f.payment_difference_brl <=>
+                CASE
+                    WHEN s.item_order_id IS NOT NULL
+                     AND s.payment_order_id IS NOT NULL
+                    THEN s.paid_value - s.total_value
+                END
+            )
+            AND (
+                f.payment_item_mismatch_flag <=>
+                CASE
+                    WHEN s.item_order_id IS NOT NULL
+                     AND s.payment_order_id IS NOT NULL
+                    THEN ABS(s.paid_value - s.total_value)
+                         > CAST(0.01 AS DECIMAL(18, 2))
+                END
+            )
+        ) AS financial_metrics_mismatch,
+
+        NOT (
+            (
+                f.is_delivery_eligible <=>
+                (
+                    s.order_status = 'delivered'
+                    AND s.order_delivered_customer_date IS NOT NULL
+                    AND s.order_estimated_delivery_date IS NOT NULL
+                )
+            )
+            AND (
+                f.is_late_delivery <=>
+                CASE
+                    WHEN s.order_status = 'delivered'
+                     AND s.order_delivered_customer_date IS NOT NULL
+                     AND s.order_estimated_delivery_date IS NOT NULL
+                    THEN CAST(s.order_delivered_customer_date AS DATE)
+                       > CAST(s.order_estimated_delivery_date AS DATE)
+                END
+            )
+            AND (
+                f.days_late <=>
+                CASE
+                    WHEN s.order_status = 'delivered'
+                     AND s.order_delivered_customer_date IS NOT NULL
+                     AND s.order_estimated_delivery_date IS NOT NULL
+                    THEN GREATEST(
+                        DATEDIFF(
+                            CAST(s.order_delivered_customer_date AS DATE),
+                            CAST(s.order_estimated_delivery_date AS DATE)
+                        ),
+                        0
+                    )
+                END
+            )
+            AND (
+                f.delivery_duration_days <=>
+                CASE
+                    WHEN s.order_status = 'delivered'
+                     AND s.order_delivered_customer_date IS NOT NULL
+                     AND s.order_purchase_timestamp IS NOT NULL
+                    THEN DATEDIFF(
+                        CAST(s.order_delivered_customer_date AS DATE),
+                        CAST(s.order_purchase_timestamp AS DATE)
+                    )
+                END
+            )
+            AND (
+                f.promised_delivery_days <=>
+                CASE
+                    WHEN s.order_purchase_timestamp IS NOT NULL
+                     AND s.order_estimated_delivery_date IS NOT NULL
+                    THEN DATEDIFF(
+                        CAST(s.order_estimated_delivery_date AS DATE),
+                        CAST(s.order_purchase_timestamp AS DATE)
+                    )
+                END
+            )
+            AND (
+                f.delivered_without_delivery_date <=>
+                (
+                    s.order_status = 'delivered'
+                    AND s.order_delivered_customer_date IS NULL
+                )
+            )
+            AND (
+                f.carrier_after_customer_delivery_flag <=>
+                CASE
+                    WHEN s.order_delivered_carrier_date IS NOT NULL
+                     AND s.order_delivered_customer_date IS NOT NULL
+                    THEN s.order_delivered_carrier_date >
+                         s.order_delivered_customer_date
+                END
+            )
+        ) AS delivery_metrics_mismatch,
+
+        NOT (
+            (
+                f.order_purchase_date <=>
+                CAST(s.order_purchase_timestamp AS DATE)
+            )
+            AND (
+                f.estimated_delivery_date <=>
+                CAST(s.order_estimated_delivery_date AS DATE)
+            )
+            AND (
+                f.actual_delivery_date <=>
+                CAST(s.order_delivered_customer_date AS DATE)
+            )
+            AND (
+                f.order_purchase_date_key <=>
+                CAST(DATE_FORMAT(s.order_purchase_timestamp, 'yyyyMMdd') AS INT)
+            )
+            AND (
+                f.estimated_delivery_date_key <=>
+                CAST(DATE_FORMAT(s.order_estimated_delivery_date, 'yyyyMMdd') AS INT)
+            )
+            AND (
+                f.actual_delivery_date_key <=>
+                CAST(DATE_FORMAT(s.order_delivered_customer_date, 'yyyyMMdd') AS INT)
+            )
+        ) AS date_key_mismatch
+
+    FROM source_orders AS s
+    LEFT JOIN commerceai.gold.fct_orders AS f
+        ON s.order_id = f.order_id
+),
+
+source_comparison_stats AS (
+    SELECT
+        COUNT(*) AS source_rows,
+        COUNT_IF(fact_order_id IS NULL) AS missing_orders,
+        COUNT_IF(source_attributes_mismatch) AS source_attribute_issues,
+        COUNT_IF(item_metrics_mismatch) AS item_issues,
+        COUNT_IF(payment_metrics_mismatch) AS payment_issues,
+        COUNT_IF(financial_metrics_mismatch) AS financial_issues,
+        COUNT_IF(delivery_metrics_mismatch) AS delivery_issues,
+        COUNT_IF(date_key_mismatch) AS date_key_issues
+    FROM row_comparison
+),
+
+gold_stats AS (
+    SELECT
+        COUNT(*) AS gold_rows,
+        COUNT(DISTINCT order_id) AS distinct_order_ids,
+        COUNT_IF(order_id IS NULL) AS null_order_ids
+    FROM commerceai.gold.fct_orders
+),
+
+extra_orders AS (
+    SELECT COUNT(*) AS issue_count
+    FROM commerceai.gold.fct_orders AS f
+    LEFT ANTI JOIN commerceai.silver.sl_orders AS o
+        ON f.order_id = o.order_id
+),
+
+missing_customer_keys AS (
+    SELECT COUNT(*) AS issue_count
+    FROM commerceai.gold.fct_orders AS f
+    LEFT ANTI JOIN commerceai.gold.dim_customer AS c
+        ON f.customer_id = c.customer_id
+),
+
+date_dimension_issues AS (
+    SELECT
+        COUNT_IF(
+            (f.order_purchase_date_key IS NOT NULL AND dp.date_key IS NULL)
+            OR (f.estimated_delivery_date_key IS NOT NULL AND de.date_key IS NULL)
+            OR (f.actual_delivery_date_key IS NOT NULL AND da.date_key IS NULL)
+        ) AS issue_count
+
+    FROM commerceai.gold.fct_orders AS f
+
+    LEFT JOIN commerceai.gold.dim_date AS dp
+        ON f.order_purchase_date_key = dp.date_key
+
+    LEFT JOIN commerceai.gold.dim_date AS de
+        ON f.estimated_delivery_date_key = de.date_key
+
+    LEFT JOIN commerceai.gold.dim_date AS da
+        ON f.actual_delivery_date_key = da.date_key
+),
+
+checks AS (
+    SELECT
+        'row_count_matches_silver' AS check_name,
+        CAST(s.source_rows AS STRING) AS expected_value,
+        CAST(g.gold_rows AS STRING) AS observed_value,
+        IF(s.source_rows = g.gold_rows, 'PASS', 'FAIL') AS status
+    FROM source_comparison_stats AS s
+    CROSS JOIN gold_stats AS g
+
+    UNION ALL
+
+    SELECT
+        'order_id_is_not_null_and_unique',
+        '0 null keys and one unique key per row',
+        CONCAT(
+            'null=', CAST(null_order_ids AS STRING),
+            ', distinct=', CAST(distinct_order_ids AS STRING),
+            ', rows=', CAST(gold_rows AS STRING)
+        ),
+        IF(
+            null_order_ids = 0 AND distinct_order_ids = gold_rows,
+            'PASS', 'FAIL'
+        )
+    FROM gold_stats
+
+    UNION ALL
+
+    SELECT 'no_missing_order_ids', '0',
+           CAST(missing_orders AS STRING),
+           IF(missing_orders = 0, 'PASS', 'FAIL')
+    FROM source_comparison_stats
+
+    UNION ALL
+
+    SELECT 'no_extra_order_ids', '0',
+           CAST(issue_count AS STRING),
+           IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM extra_orders
+
+    UNION ALL
+
+    SELECT 'source_order_attributes_preserved', '0',
+           CAST(source_attribute_issues AS STRING),
+           IF(source_attribute_issues = 0, 'PASS', 'FAIL')
+    FROM source_comparison_stats
+
+    UNION ALL
+
+    SELECT 'item_aggregates_match_silver', '0',
+           CAST(item_issues AS STRING),
+           IF(item_issues = 0, 'PASS', 'FAIL')
+    FROM source_comparison_stats
+
+    UNION ALL
+
+    SELECT 'payment_aggregates_match_silver', '0',
+           CAST(payment_issues AS STRING),
+           IF(payment_issues = 0, 'PASS', 'FAIL')
+    FROM source_comparison_stats
+
+    UNION ALL
+
+    SELECT 'financial_reconciliation_matches_silver', '0',
+           CAST(financial_issues AS STRING),
+           IF(financial_issues = 0, 'PASS', 'FAIL')
+    FROM source_comparison_stats
+
+    UNION ALL
+
+    SELECT 'delivery_metrics_match_contract', '0',
+           CAST(delivery_issues AS STRING),
+           IF(delivery_issues = 0, 'PASS', 'FAIL')
+    FROM source_comparison_stats
+
+    UNION ALL
+
+    SELECT 'date_keys_match_source_timestamps', '0',
+           CAST(date_key_issues AS STRING),
+           IF(date_key_issues = 0, 'PASS', 'FAIL')
+    FROM source_comparison_stats
+
+    UNION ALL
+
+    SELECT 'calendar_date_keys_resolve', '0',
+           CAST(issue_count AS STRING),
+           IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM date_dimension_issues
+
+    UNION ALL
+
+    SELECT 'customer_keys_resolve', '0',
+           CAST(issue_count AS STRING),
+           IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM missing_customer_keys
+)
+
+SELECT
+    check_name,
+    expected_value,
+    observed_value,
+    status
+FROM checks;
+
+
+-- COMMAND ----------
+
+-- DBTITLE 1,14 - Review Order Fact Validation Results
+SELECT
+    check_name,
+    expected_value,
+    observed_value,
+    status
+FROM gold_orders_validation_results
+ORDER BY check_name;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,15 - Inspect Order Fact Quality Exceptions
+SELECT
+    COUNT(*) AS total_orders,
+
+    COUNT_IF(
+        has_payments AND NOT has_order_items
+    ) AS payments_without_items,
+
+    COUNT_IF(
+        has_order_items AND NOT has_payments
+    ) AS items_without_payments,
+
+    COUNT_IF(
+        payment_item_mismatch_flag = TRUE
+    ) AS payment_item_mismatches,
+
+    COUNT_IF(
+        delivered_without_delivery_date
+    ) AS delivered_without_delivery_date,
+
+    COUNT_IF(
+        carrier_after_customer_delivery_flag = TRUE
+    ) AS carrier_after_customer_delivery,
+
+    COUNT_IF(
+        is_delivery_eligible
+    ) AS eligible_delivered_orders,
+
+    COUNT_IF(
+        is_late_delivery = TRUE
+    ) AS late_delivered_orders,
+
+    ROUND(
+        100.0 * COUNT_IF(is_late_delivery = TRUE)
+        / NULLIF(COUNT_IF(is_delivery_eligible), 0),
+        2
+    ) AS late_delivery_rate_pct
+
+FROM commerceai.gold.fct_orders;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,16 - Enforce Order Fact Quality Gate
+SELECT
+    COUNT(*) AS total_checks,
+
+    COUNT_IF(status = 'PASS') AS passed_checks,
+
+    COUNT(*) - COUNT_IF(status = 'PASS') AS failed_checks,
+
+    ASSERT_TRUE(
+        COUNT(*) = 12
+        AND COUNT_IF(status = 'PASS') = 12,
+        'Gold order fact validation failed. Review the preceding checks.'
+    ) AS validation_gate
+
+FROM gold_orders_validation_results;
