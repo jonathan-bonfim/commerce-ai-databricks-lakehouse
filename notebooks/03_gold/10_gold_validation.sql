@@ -558,3 +558,294 @@ SELECT
         'Gold product dimension validation failed. Review the preceding checks.'
     ) AS validation_gate
 FROM gold_product_validation_results;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,10 - Prepare Seller Dimension Validation Checks
+CREATE OR REPLACE TEMP VIEW gold_seller_validation_results AS
+
+WITH source_stats AS (
+    SELECT
+        COUNT(*) AS source_rows
+    FROM commerceai.silver.sl_sellers
+),
+
+expected_seller AS (
+    SELECT
+        s.seller_id,
+        s.seller_zip_code_prefix,
+        s.seller_city,
+        s.seller_state,
+
+        g.geolocation_lat,
+        g.geolocation_lng,
+        g.geolocation_city AS reference_geolocation_city,
+        g.geolocation_state AS reference_geolocation_state,
+
+        (g.geolocation_zip_code_prefix IS NOT NULL)
+            AS has_geolocation_match,
+
+        (
+            g.geolocation_lat IS NOT NULL
+            AND g.geolocation_lng IS NOT NULL
+        ) AS has_geolocation_coordinates,
+
+        CASE
+            WHEN g.geolocation_zip_code_prefix IS NULL
+                THEN 'NOT_FOUND'
+            ELSE g.geolocation_coordinate_status
+        END AS geolocation_coordinate_status,
+
+        g.geolocation_has_state_conflict,
+        g.geolocation_has_city_variation
+
+    FROM commerceai.silver.sl_sellers AS s
+    LEFT JOIN commerceai.silver.sl_geolocation AS g
+        ON s.seller_zip_code_prefix = g.geolocation_zip_code_prefix
+),
+
+expected_geo_stats AS (
+    SELECT
+        COUNT_IF(NOT has_geolocation_match)
+            AS unmatched_rows,
+
+        COUNT_IF(has_geolocation_coordinates)
+            AS coordinate_rows
+    FROM expected_seller
+),
+
+gold_stats AS (
+    SELECT
+        COUNT(*) AS gold_rows,
+        COUNT(DISTINCT seller_id) AS distinct_seller_ids,
+        COUNT_IF(seller_id IS NULL) AS null_seller_ids,
+
+        COUNT_IF(has_geolocation_match = FALSE)
+            AS unmatched_rows,
+
+        COUNT_IF(has_geolocation_coordinates = TRUE)
+            AS coordinate_rows,
+
+        SUM(
+            CASE
+                WHEN has_geolocation_match IS NULL
+                  OR has_geolocation_coordinates IS NULL
+                  OR geolocation_coordinate_status IS NULL
+                  OR geolocation_coordinate_status
+                     NOT IN ('AVAILABLE', 'MISSING', 'NOT_FOUND')
+
+                  OR NOT (
+                      has_geolocation_coordinates <=>
+                      (
+                          geolocation_lat IS NOT NULL
+                          AND geolocation_lng IS NOT NULL
+                      )
+                  )
+
+                  OR (
+                      has_geolocation_match = FALSE
+                      AND (
+                          geolocation_coordinate_status <> 'NOT_FOUND'
+                          OR has_geolocation_coordinates = TRUE
+                          OR geolocation_lat IS NOT NULL
+                          OR geolocation_lng IS NOT NULL
+                          OR reference_geolocation_city IS NOT NULL
+                          OR reference_geolocation_state IS NOT NULL
+                          OR geolocation_has_state_conflict IS NOT NULL
+                          OR geolocation_has_city_variation IS NOT NULL
+                      )
+                  )
+
+                  OR (
+                      has_geolocation_match = TRUE
+                      AND (
+                          geolocation_coordinate_status = 'NOT_FOUND'
+                          OR (
+                              has_geolocation_coordinates = TRUE
+                              AND geolocation_coordinate_status <> 'AVAILABLE'
+                          )
+                          OR (
+                              has_geolocation_coordinates = FALSE
+                              AND geolocation_coordinate_status <> 'MISSING'
+                          )
+                      )
+                  )
+                THEN 1
+                ELSE 0
+            END
+        ) AS invalid_geo_flag_rows
+
+    FROM commerceai.gold.dim_seller
+),
+
+extra_gold_keys AS (
+    SELECT COUNT(*) AS issue_count
+    FROM commerceai.gold.dim_seller AS d
+    LEFT ANTI JOIN commerceai.silver.sl_sellers AS s
+        ON d.seller_id = s.seller_id
+),
+
+missing_gold_keys AS (
+    SELECT COUNT(*) AS issue_count
+    FROM commerceai.silver.sl_sellers AS s
+    LEFT ANTI JOIN commerceai.gold.dim_seller AS d
+        ON s.seller_id = d.seller_id
+),
+
+seller_attribute_issues AS (
+    SELECT COUNT(*) AS issue_count
+    FROM commerceai.gold.dim_seller AS d
+    INNER JOIN commerceai.silver.sl_sellers AS s
+        ON d.seller_id = s.seller_id
+    WHERE NOT (
+        (d.seller_zip_code_prefix <=> s.seller_zip_code_prefix)
+        AND (d.seller_city <=> s.seller_city)
+        AND (d.seller_state <=> s.seller_state)
+    )
+),
+
+geolocation_attribute_issues AS (
+    SELECT COUNT(*) AS issue_count
+    FROM commerceai.gold.dim_seller AS d
+    INNER JOIN expected_seller AS e
+        ON d.seller_id = e.seller_id
+    WHERE NOT (
+        (d.geolocation_lat <=> e.geolocation_lat)
+        AND (d.geolocation_lng <=> e.geolocation_lng)
+        AND (d.reference_geolocation_city <=> e.reference_geolocation_city)
+        AND (d.reference_geolocation_state <=> e.reference_geolocation_state)
+        AND (d.has_geolocation_match <=> e.has_geolocation_match)
+        AND (d.has_geolocation_coordinates <=> e.has_geolocation_coordinates)
+        AND (d.geolocation_coordinate_status <=> e.geolocation_coordinate_status)
+        AND (d.geolocation_has_state_conflict <=> e.geolocation_has_state_conflict)
+        AND (d.geolocation_has_city_variation <=> e.geolocation_has_city_variation)
+    )
+),
+
+checks AS (
+    SELECT
+        'row_count_matches_silver' AS check_name,
+        CAST(s.source_rows AS STRING) AS expected_value,
+        CAST(g.gold_rows AS STRING) AS observed_value,
+        IF(s.source_rows = g.gold_rows, 'PASS', 'FAIL') AS status
+    FROM source_stats AS s
+    CROSS JOIN gold_stats AS g
+
+    UNION ALL
+
+    SELECT
+        'seller_id_is_not_null_and_unique',
+        '0 null keys and one unique key per row',
+        CONCAT(
+            'null=', CAST(null_seller_ids AS STRING),
+            ', distinct=', CAST(distinct_seller_ids AS STRING),
+            ', rows=', CAST(gold_rows AS STRING)
+        ),
+        IF(
+            null_seller_ids = 0
+            AND distinct_seller_ids = gold_rows,
+            'PASS', 'FAIL'
+        )
+    FROM gold_stats
+
+    UNION ALL
+
+    SELECT
+        'no_extra_seller_ids',
+        '0',
+        CAST(issue_count AS STRING),
+        IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM extra_gold_keys
+
+    UNION ALL
+
+    SELECT
+        'no_missing_seller_ids',
+        '0',
+        CAST(issue_count AS STRING),
+        IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM missing_gold_keys
+
+    UNION ALL
+
+    SELECT
+        'source_seller_attributes_preserved',
+        '0',
+        CAST(issue_count AS STRING),
+        IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM seller_attribute_issues
+
+    UNION ALL
+
+    SELECT
+        'geolocation_attributes_match_silver',
+        '0',
+        CAST(issue_count AS STRING),
+        IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM geolocation_attribute_issues
+
+    UNION ALL
+
+    SELECT
+        'unmatched_geolocation_rows_preserved',
+        CAST(e.unmatched_rows AS STRING),
+        CAST(g.unmatched_rows AS STRING),
+        IF(e.unmatched_rows = g.unmatched_rows, 'PASS', 'FAIL')
+    FROM expected_geo_stats AS e
+    CROSS JOIN gold_stats AS g
+
+    UNION ALL
+
+    SELECT
+        'geolocation_coordinate_coverage_matches_silver',
+        CAST(e.coordinate_rows AS STRING),
+        CAST(g.coordinate_rows AS STRING),
+        IF(e.coordinate_rows = g.coordinate_rows, 'PASS', 'FAIL')
+    FROM expected_geo_stats AS e
+    CROSS JOIN gold_stats AS g
+
+    UNION ALL
+
+    SELECT
+        'geolocation_flags_are_consistent',
+        '0',
+        CAST(invalid_geo_flag_rows AS STRING),
+        IF(invalid_geo_flag_rows = 0, 'PASS', 'FAIL')
+    FROM gold_stats
+)
+
+SELECT
+    check_name,
+    expected_value,
+    observed_value,
+    status
+FROM checks;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,11 - Review Seller Dimension Validation Results
+SELECT
+    check_name,
+    expected_value,
+    observed_value,
+    status
+FROM gold_seller_validation_results
+ORDER BY check_name;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,12 - Enforce Seller Dimension Quality Gate
+SELECT
+    COUNT(*) AS total_checks,
+
+    COUNT_IF(status = 'PASS') AS passed_checks,
+
+    COUNT(*) - COUNT_IF(status = 'PASS') AS failed_checks,
+
+    ASSERT_TRUE(
+        COUNT(*) = 9
+        AND COUNT_IF(status = 'PASS') = 9,
+        'Gold seller dimension validation failed. Review the preceding checks.'
+    ) AS validation_gate
+
+FROM gold_seller_validation_results;
