@@ -287,3 +287,69 @@ FROM commerceai.gold.dim_product
 ORDER BY product_id
 LIMIT 10
 """))
+
+# COMMAND ----------
+
+# DBTITLE 1,08 - Build Seller Dimension With Embedded SQL
+# Grain: one row per seller_id.
+# Preserve seller attributes and enrich with optional ZIP-level geolocation.
+
+spark.sql("""
+CREATE OR REPLACE TABLE commerceai.gold.dim_seller
+USING DELTA
+COMMENT 'Seller dimension at seller_id grain with original seller attributes and optional reference geolocation.'
+AS
+SELECT
+    s.seller_id,
+    s.seller_zip_code_prefix,
+    s.seller_city,
+    s.seller_state,
+
+    g.geolocation_lat,
+    g.geolocation_lng,
+    g.geolocation_city AS reference_geolocation_city,
+    g.geolocation_state AS reference_geolocation_state,
+
+    (g.geolocation_zip_code_prefix IS NOT NULL)
+        AS has_geolocation_match,
+
+    (
+        g.geolocation_lat IS NOT NULL
+        AND g.geolocation_lng IS NOT NULL
+    ) AS has_geolocation_coordinates,
+
+    CASE
+        WHEN g.geolocation_zip_code_prefix IS NULL
+            THEN 'NOT_FOUND'
+        ELSE g.geolocation_coordinate_status
+    END AS geolocation_coordinate_status,
+
+    g.geolocation_has_state_conflict,
+    g.geolocation_has_city_variation
+
+FROM commerceai.silver.sl_sellers AS s
+
+LEFT JOIN commerceai.silver.sl_geolocation AS g
+    ON s.seller_zip_code_prefix = g.geolocation_zip_code_prefix
+""")
+
+print("Gold seller dimension built: commerceai.gold.dim_seller")
+
+# COMMAND ----------
+
+# DBTITLE 1,09 - Preview Seller Dimension
+display(spark.sql("""
+SELECT
+    seller_id,
+    seller_zip_code_prefix,
+    seller_city,
+    seller_state,
+    reference_geolocation_city,
+    reference_geolocation_state,
+    has_geolocation_match,
+    has_geolocation_coordinates,
+    geolocation_coordinate_status
+FROM commerceai.gold.dim_seller
+ORDER BY seller_id
+LIMIT 10
+"""))
