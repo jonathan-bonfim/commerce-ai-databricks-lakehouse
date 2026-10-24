@@ -131,3 +131,53 @@ HAVING COUNT(*) >= 100
 ORDER BY
     late_delivery_rate_pct DESC,
     eligible_delivered_orders DESC;
+
+
+-- COMMAND ----------
+
+-- DBTITLE 1,03 - Product Category Performance
+
+-- Analyze item values from delivered orders by product category.
+-- Missing categories remain visible in the analytical output.
+
+SELECT
+    COALESCE(
+        p.product_category_name,
+        'uncategorized'
+    ) AS product_category,
+
+    p.product_category_status,
+
+    COUNT(*) AS delivered_item_rows,
+
+    COUNT(DISTINCT i.order_id)
+        AS delivered_orders_with_category,
+
+    COUNT(DISTINCT i.product_id)
+        AS distinct_products,
+
+    SUM(i.item_value_brl)
+        AS delivered_item_value_brl,
+
+    SUM(i.freight_value_brl)
+        AS delivered_freight_value_brl,
+
+    ROUND(
+        AVG(i.item_value_brl),
+        2
+    ) AS avg_item_value_brl
+
+FROM commerceai.gold.fct_order_items AS i
+
+INNER JOIN commerceai.gold.dim_product AS p
+    ON i.product_id = p.product_id
+
+WHERE i.order_status = 'delivered'
+
+GROUP BY
+    p.product_category_name,
+    p.product_category_status
+
+ORDER BY delivered_item_value_brl DESC
+
+LIMIT 15;
