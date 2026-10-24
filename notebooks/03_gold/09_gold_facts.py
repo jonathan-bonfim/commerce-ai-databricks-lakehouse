@@ -3,37 +3,19 @@
 # [tool.databricks.environment]
 # environment_version = "6"
 # ///
+
 # MAGIC %md
 # MAGIC # 09 — Gold Facts
 # MAGIC
-# MAGIC **Purpose:** Build analytical fact tables in the CommerceAI Gold layer using embedded Spark SQL.
+# MAGIC **Purpose:** Build four Gold transactional facts with native Spark SQL embedded in Python notebook cells.
 # MAGIC
-# MAGIC **Inputs:**
-# MAGIC - `commerceai.silver.sl_orders`
-# MAGIC - `commerceai.silver.sl_order_items`
-# MAGIC - `commerceai.silver.sl_payments`
+# MAGIC **Inputs:** `commerceai.silver.sl_orders`, `sl_order_items`, `sl_payments`, and `sl_reviews`.
 # MAGIC
-# MAGIC **Outputs:**
-# MAGIC - `commerceai.gold.fct_orders`
-# MAGIC - `commerceai.gold.fct_order_items`
-# MAGIC - `commerceai.gold.fct_payments`
-# MAGIC - `commerceai.gold.fct_reviews`
+# MAGIC **Outputs:** `commerceai.gold.fct_orders`, `fct_order_items`, `fct_payments`, and `fct_reviews`.
 # MAGIC
-# MAGIC **Main Responsibilities:**
-# MAGIC - Preserve one row per order.
-# MAGIC - Aggregate order items and payments independently.
-# MAGIC - Preserve financial differences and missing source relationships.
-# MAGIC - Create historical delivery performance metrics.
-# MAGIC - Use Delta tables for analytical consumption.
+# MAGIC **Main Responsibilities:** Preserve each fact grain; aggregate payments and items separately at order grain; retain missing transactions and original review text; provide historical delivery and finance metrics without cross-grain fanout.
 # MAGIC
-# MAGIC **Execution / Validation Notes:**
-# MAGIC - Run after the Silver validation gate and Gold dimensions.
-# MAGIC - Execute transformations using `spark.sql()`.
-# MAGIC - Do not join item-level and payment-level records directly.
-# MAGIC - Keep monetary values as exact decimals.
-# MAGIC - Apply date-based delivery comparisons without assuming source timezone.
-# MAGIC - Run `10_gold_validation` separately after building the facts.
-# MAGIC - The current implementation uses full-load replacement.
+# MAGIC **Execution / Validation Notes:** Run after `08_gold_dimensions`. Verify UTC/Etc-UTC Spark session settings, then build facts in the defined order. Run `10_gold_validation` separately. This is a full-load replacement per table, not a single atomic multi-table transaction. This build notebook intentionally excludes preview queries, diagnostics, and validation gates.
 
 # COMMAND ----------
 
@@ -259,32 +241,9 @@ FROM order_enriched
 
 print("Gold order fact built: commerceai.gold.fct_orders")
 
-
 # COMMAND ----------
 
-# DBTITLE 1,03 - Preview Order Fact
-display(spark.sql("""
-SELECT
-    order_id,
-    customer_id,
-    order_status,
-    item_count,
-    distinct_seller_count,
-    payment_count,
-    ordered_total_value_brl,
-    paid_value_brl,
-    payment_difference_brl,
-    is_delivery_eligible,
-    is_late_delivery,
-    days_late
-FROM commerceai.gold.fct_orders
-ORDER BY order_purchase_timestamp, order_id
-LIMIT 10
-"""))
-
-# COMMAND ----------
-
-# DBTITLE 1,04 - Build Order Items Fact With Embedded SQL
+# DBTITLE 1,03 - Build Order Items Fact With Embedded SQL
 
 # Grain: one row per order_id and order_item_id.
 # Preserve transactional item values without allocating order payments.
@@ -343,31 +302,9 @@ LEFT JOIN commerceai.silver.sl_orders AS o
 
 print("Gold order items fact built: commerceai.gold.fct_order_items")
 
-
 # COMMAND ----------
 
-# DBTITLE 1,05 - Preview Order Items Fact
-display(spark.sql("""
-SELECT
-    order_id,
-    order_item_id,
-    customer_id,
-    product_id,
-    seller_id,
-    order_status,
-    order_purchase_date,
-    shipping_limit_calendar_date,
-    item_value_brl,
-    freight_value_brl,
-    ordered_total_value_brl
-FROM commerceai.gold.fct_order_items
-ORDER BY order_id, order_item_id
-LIMIT 10
-"""))
-
-# COMMAND ----------
-
-# DBTITLE 1,06 - Build Payments Fact With Embedded SQL
+# DBTITLE 1,04 - Build Payments Fact With Embedded SQL
 
 # Grain: one row per order_id and payment_sequential.
 # Preserve payment records, methods, installments and exact amounts.
@@ -419,30 +356,9 @@ LEFT JOIN commerceai.silver.sl_orders AS o
 
 print("Gold payments fact built: commerceai.gold.fct_payments")
 
-
 # COMMAND ----------
 
-# DBTITLE 1,07 - Preview Payments Fact
-display(spark.sql("""
-SELECT
-    order_id,
-    payment_sequential,
-    customer_id,
-    order_status,
-    order_purchase_date,
-    payment_type,
-    payment_installments,
-    payment_value_brl,
-    is_zero_value_payment,
-    has_zero_installments
-FROM commerceai.gold.fct_payments
-ORDER BY order_id, payment_sequential
-LIMIT 10
-"""))
-
-# COMMAND ----------
-
-# DBTITLE 1,08 - Build Reviews Fact With Embedded SQL
+# DBTITLE 1,05 - Build Reviews Fact With Embedded SQL
 
 # Grain: one row per review_id and order_id.
 # Preserve review scores and original text without normalization.
@@ -511,24 +427,3 @@ LEFT JOIN commerceai.silver.sl_orders AS o
 """)
 
 print("Gold reviews fact built: commerceai.gold.fct_reviews")
-
-
-# COMMAND ----------
-
-# DBTITLE 1,09 - Preview Reviews Fact
-display(spark.sql("""
-SELECT
-    review_id,
-    order_id,
-    customer_id,
-    review_score,
-    review_comment_title,
-    review_comment_message,
-    review_creation_calendar_date,
-    review_answer_calendar_date,
-    has_review_title,
-    has_review_message
-FROM commerceai.gold.fct_reviews
-ORDER BY review_id, order_id
-LIMIT 10
-"""))
