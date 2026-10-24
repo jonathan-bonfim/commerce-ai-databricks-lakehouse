@@ -84,3 +84,50 @@ GROUP BY
     TRUNC(order_purchase_date, 'MONTH')
 
 ORDER BY purchase_month;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,02 - Delivery Delay Performance by Customer State
+
+-- Compare delivery delay rates across customer states.
+-- Include only orders with a valid historical delivery outcome.
+
+SELECT
+    c.customer_state,
+
+    COUNT(*) AS eligible_delivered_orders,
+
+    COUNT_IF(
+        o.is_late_delivery = TRUE
+    ) AS late_delivered_orders,
+
+    ROUND(
+        100.0 * COUNT_IF(o.is_late_delivery = TRUE)
+        / NULLIF(COUNT(*), 0),
+        2
+    ) AS late_delivery_rate_pct,
+
+    ROUND(
+        AVG(
+            CASE
+                WHEN o.is_late_delivery = TRUE
+                THEN o.days_late
+            END
+        ),
+        2
+    ) AS avg_days_late_among_late_orders
+
+FROM commerceai.gold.fct_orders AS o
+
+INNER JOIN commerceai.gold.dim_customer AS c
+    ON o.customer_id = c.customer_id
+
+WHERE o.is_delivery_eligible = TRUE
+
+GROUP BY c.customer_state
+
+HAVING COUNT(*) >= 100
+
+ORDER BY
+    late_delivery_rate_pct DESC,
+    eligible_delivered_orders DESC;
