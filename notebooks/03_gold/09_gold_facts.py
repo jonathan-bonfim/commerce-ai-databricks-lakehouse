@@ -3,7 +3,6 @@
 # [tool.databricks.environment]
 # environment_version = "6"
 # ///
-
 # MAGIC %md
 # MAGIC # 09 — Gold Facts
 # MAGIC
