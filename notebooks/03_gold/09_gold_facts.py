@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # 09 — Gold Facts
 # MAGIC
@@ -11,6 +15,7 @@
 # MAGIC
 # MAGIC **Outputs:**
 # MAGIC - `commerceai.gold.fct_orders`
+# MAGIC - `commerceai.gold.fct_order_items`
 # MAGIC
 # MAGIC **Main Responsibilities:**
 # MAGIC - Preserve one row per order.
@@ -272,5 +277,88 @@ SELECT
     days_late
 FROM commerceai.gold.fct_orders
 ORDER BY order_purchase_timestamp, order_id
+LIMIT 10
+"""))
+
+# COMMAND ----------
+
+# DBTITLE 1,04 - Build Order Items Fact With Embedded SQL
+
+# Grain: one row per order_id and order_item_id.
+# Preserve transactional item values without allocating order payments.
+# Enrich each item with its order-level customer, status and purchase date.
+
+spark.sql("""
+CREATE OR REPLACE TABLE commerceai.gold.fct_order_items
+USING DELTA
+COMMENT 'Transactional order item fact with product, seller, customer, purchase date and item-level amounts.'
+AS
+
+SELECT
+    -- Business keys and dimensional relationships
+    i.order_id,
+    i.order_item_id,
+    o.customer_id,
+    i.product_id,
+    i.seller_id,
+
+    -- Order context
+    o.order_status,
+    o.order_purchase_timestamp,
+
+    CAST(o.order_purchase_timestamp AS DATE)
+        AS order_purchase_date,
+
+    CAST(
+        DATE_FORMAT(o.order_purchase_timestamp, 'yyyyMMdd')
+        AS INT
+    ) AS order_purchase_date_key,
+
+    -- Item shipping deadline, not the promised customer delivery date
+    i.shipping_limit_date,
+
+    CAST(i.shipping_limit_date AS DATE)
+        AS shipping_limit_calendar_date,
+
+    CAST(
+        DATE_FORMAT(i.shipping_limit_date, 'yyyyMMdd')
+        AS INT
+    ) AS shipping_limit_date_key,
+
+    -- Item-level financial metrics
+    i.price AS item_value_brl,
+
+    i.freight_value AS freight_value_brl,
+
+    (i.price + i.freight_value)
+        AS ordered_total_value_brl
+
+FROM commerceai.silver.sl_order_items AS i
+
+LEFT JOIN commerceai.silver.sl_orders AS o
+    ON i.order_id = o.order_id
+""")
+
+print("Gold order items fact built: commerceai.gold.fct_order_items")
+
+
+# COMMAND ----------
+
+# DBTITLE 1,05 - Preview Order Items Fact
+display(spark.sql("""
+SELECT
+    order_id,
+    order_item_id,
+    customer_id,
+    product_id,
+    seller_id,
+    order_status,
+    order_purchase_date,
+    shipping_limit_calendar_date,
+    item_value_brl,
+    freight_value_brl,
+    ordered_total_value_brl
+FROM commerceai.gold.fct_order_items
+ORDER BY order_id, order_item_id
 LIMIT 10
 """))
