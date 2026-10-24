@@ -2,9 +2,9 @@
 
 CommerceAI is an end-to-end Data Engineering portfolio project built around the **Brazilian E-Commerce Public Dataset by Olist**. Its goal is to turn raw transactional data into trustworthy, reusable analytical datasets and, in future phases, delivery-delay predictions, AI-assisted customer feedback analysis, and Power BI dashboards.
 
-The project uses a **Medallion Architecture** on **Databricks Free Edition** with **Unity Catalog**, **Delta Lake**, **PySpark**, and **Spark SQL**. The forthcoming Gold layer will be **SQL-first**, with substantive `.sql` scripts tracked in GitHub alongside the Databricks notebooks.
+The project uses a **Medallion Architecture** on **Databricks Free Edition** with **Unity Catalog**, **Delta Lake**, **PySpark**, and **Spark SQL**. The **implemented Gold layer** uses Spark SQL embedded in Python build notebooks, with dedicated SQL-native notebooks for validation and business analysis.
 
-> **Project status — October 17, 2026:** ✅ Bronze completed · ✅ Silver completed (**PASS WITH WARNINGS**) · ⏳ Gold, Machine Learning, Review AI, and Power BI not started.
+> **Project status — October 24, 2026:** ✅ Bronze completed · ✅ Silver completed (**PASS WITH WARNINGS**) · ✅ Gold built and validated (**82 PASS, 0 FAIL**) · ✅ Gold SQL business analysis (6 queries) · ⏳ ML, Review AI, and Power BI not started.
 >
 > **Last executed integrated Silver gate:** **83 checks — 69 PASS, 14 WARN, 0 FAIL**, across all **9 Silver tables**. Warnings are documented source-data and coverage limitations, not silent corrections.
 
@@ -63,7 +63,7 @@ Neither track has been implemented yet.
                             |
                             v
                  +--------------------+
-                 | Gold Delta         |  PLANNED — SQL-FIRST
+                 | Gold Delta         |  COMPLETED — SQL
                  | Dimensional marts  |
                  +--------------------+
                       |          |
@@ -71,13 +71,13 @@ Neither track has been implemented yet.
              Business analytics  Future ML / review AI outputs
                       |
                       v
-           Databricks SQL / available access path
+           SQL analysis notebook (6 analyses executed)
                       |
                       v
                 Power BI Desktop       PLANNED
 ```
 
-The exact Gold dimensional model, ML feature pipeline, review-AI output tables, and reporting integration are **design decisions for future phases**, not existing assets.
+The Gold dimensional model and native SQL business analysis are implemented and validated. ML feature pipelines, review-AI outputs, Power BI connectivity and production orchestration remain future work.
 
 ### Unity Catalog structure
 
@@ -104,8 +104,16 @@ commerceai
 │   ├── sl_products
 │   ├── sl_sellers
 │   └── sl_product_category_translation
-├── gold    # Schema available; marts not yet implemented
-└── ml      # Schema available; ML datasets not yet implemented
+├── gold
+│   ├── dim_date
+│   ├── dim_customer
+│   ├── dim_product
+│   ├── dim_seller
+│   ├── fct_orders
+│   ├── fct_order_items
+│   ├── fct_payments
+│   └── fct_reviews
+└── ml      # Schema available; no ML feature/model implementation yet
 ```
 
 Raw files are uploaded to `/Volumes/commerceai/bronze/raw_files/`, separated into source-specific directories. **Raw Olist CSV files are not committed to this repository.**
@@ -244,6 +252,10 @@ Databricks Free Edition Serverless did not support explicit DataFrame `persist()
 | `05_silver_source_assessment` | Assess actual types, ZIP formats, geolocation conflicts, and category coverage | Exploration / manual |
 | `06_silver_transformations` | Build the nine conformed Silver Delta tables | Pipeline step |
 | `07_silver_validation` | Validate inventory, schemas, keys, relationships, and quality | Quality gate |
+| `08_gold_dimensions` | Build four Gold dimensions with embedded Spark SQL | Gold build step |
+| `09_gold_facts` | Build four Gold facts with embedded Spark SQL | Gold build step |
+| `10_gold_validation` | Run all 82 independent Gold SQL contracts | Gold quality gate |
+| `11_gold_business_analysis` | Six read-only SQL business analyses | Exploration / manual |
 
 **Refactoring note:** To avoid running exploratory diagnostics during every pipeline execution, revised versions of notebooks `02`, `06`, and `07` were prepared. The revised `06` contains **15 code cells plus an introductory Markdown cell**, reduced from **52 code cells**. The revised `07` adds **13 numerical-fidelity checks** (for **96 planned checks in total**). **The 96-check revision has not yet been confirmed as executed**, so the validated result remains **83 checks: 69 PASS, 14 WARN, 0 FAIL**. Any imported revision should be rerun before claiming operational equivalence.
 
@@ -260,23 +272,35 @@ This is a **recommended workflow design**, not a claim that a Databricks Job has
 
 ---
 
-## Next phase: SQL-first Gold modeling
+## Completed: Gold dimensional model and SQL analysis
 
-**Gold has not been implemented.** The next task is to design the business-facing model: agree on fact/dimension grain, relationship cardinalities, KPI definitions, time semantics, conformed dimensions, and treatment of missing/unmapped data before writing transformations.
+The Gold layer is implemented as **four conformed dimensions and four fact tables**, with independently validated source-to-Gold and cross-fact contracts. The original integrated gate completed with **82 PASS / 0 FAIL**. No review or payment rows were deduplicated; documented quality gaps remain visible.
 
-The Gold implementation will prioritize **Spark SQL / Databricks SQL** for joins, aggregation, window functions, CTEs, dimensional transformations, and Delta table materialization. The repository will include **actual `.sql` source files**, in addition to notebooks and PySpark orchestration where useful, so SQL is both maintainable and visible as a language in GitHub's source-language statistics. GitHub percentages will depend on the committed files and language detection.
+| Gold table | Grain | Verified rows | Original checks |
+|---|---|---:|---:|
+| `dim_date` | 1 per calendar date | 1,827 | 7 PASS |
+| `dim_customer` | 1 per `customer_id` | 99,441 | 9 PASS |
+| `dim_product` | 1 per `product_id` | 32,951 | 8 PASS |
+| `dim_seller` | 1 per `seller_id` | 3,095 | 9 PASS |
+| `fct_orders` | 1 per `order_id` | 99,441 | 12 PASS |
+| `fct_order_items` | 1 per (`order_id`, `order_item_id`) | 112,650 | 12 PASS |
+| `fct_payments` | 1 per (`order_id`, `payment_sequential`) | 103,886 | 12 PASS |
+| `fct_reviews` | 1 per (`review_id`, `order_id`) | 99,224 | 13 PASS |
 
-Key modeling safeguards:
+**Build:** `08_gold_dimensions.py` and `09_gold_facts.py` use `spark.sql(...)` for substantial SQL transformations without external script dependencies. **Gate:** `10_gold_validation.sql` runs independent SQL contracts. **Analysis:** `11_gold_business_analysis.sql` runs six read-only analytical queries. The exploratory notebook is **not** part of the build workflow.
 
-- Preserve the difference between **99,441 order-associated customer IDs** and **96,096 unique consumers**.
-- Preserve `order_id` as a business key and resolve one-to-many relationships before creating order-grain facts.
-- Define payment measures and product/freight value measures separately; do not treat their totals as universally identical.
-- Avoid multiplying order totals by joining order items, payments, and reviews directly at incompatible grains.
-- Use appropriate missing-location handling before distance-based features or maps.
-- Define delivery lateness and eligibility carefully; do not treat a missing delivery date as automatically on-time or late.
-- Keep delivery prediction features free of post-event customer reviews and actual delivery outcomes.
+**Gold review/refactor (October 24, 2026):** The original validated notebooks were reviewed for repeated previews and per-table result/gate overhead. Streamlined versions retain the same eight table-building SQL statements and all 82 SQL check definitions. **The streamlined versions have not yet been rerun in Databricks**, so `82 PASS / 0 FAIL` refers to the previous executed versions.
 
-No Gold fact or dimension names are final yet.
+Key analytical findings:
+
+- Date-based late deliveries: **6,534 of 96,470 eligible delivered orders (6.77%)**.
+- Recorded item value **BRL 13,591,643.70** plus freight **BRL 2,251,909.54** totals **BRL 15,843,553.24** in the order-item fact. These amounts are not accounting revenue.
+- Review association among eligible reviewed deliveries: average order-level score **2.27 late** vs **4.29 on-time**. This does not establish causality.
+- Delivered-order repeat segment: **2,801 consumers** with 2+ delivered orders among **93,358 consumers** with 1+ delivered orders (**3.00%**).
+
+**Semantics:** `fct_orders` is an order-level accumulating snapshot; the other facts preserve item/payment/review transactions. Items and payments are aggregated separately before joining to orders. Order-level amounts must not be added again to item-level amounts. Full-load writes are **per-table**, with no demonstrated atomic multi-table publication or deployed production job.
+
+See [Gold architecture, quality contracts, metrics, and findings](docs/gold/README.md).
 
 ---
 
@@ -309,7 +333,9 @@ Raw Olist files must be obtained from the cited dataset and uploaded to the decl
 | Silver transformations (9 tables) | ✅ Completed |
 | Silver integrated validation | ✅ Completed with 14 documented warnings |
 | Refactored notebook revalidation | ⏳ Pending confirmation |
-| SQL-first Gold dimensional model | ⏳ Not started |
+| Gold dimensional model (8 tables) | ✅ Completed; original gate 82 PASS / 0 FAIL |
+| Gold business analysis notebook | ✅ Six SQL queries executed |
+| Gold refactored notebook revalidation | ⏳ Pending execution of revised notebooks |
 | Delivery Delay Prediction / MLflow | ⏳ Not started |
 | Review AI / LLM | ⏳ Not started |
 | Power BI dashboard | ⏳ Not started |
