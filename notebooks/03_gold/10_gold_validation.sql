@@ -2106,3 +2106,544 @@ SELECT
     ) AS validation_gate
 
 FROM gold_payments_validation_results;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,25 - Prepare Reviews Fact Validation Checks
+
+CREATE OR REPLACE TEMP VIEW gold_reviews_validation_results AS
+
+WITH source_stats AS (
+
+    SELECT COUNT(*) AS source_rows
+    FROM commerceai.silver.sl_reviews
+
+),
+
+gold_stats AS (
+
+    SELECT
+        COUNT(*) AS gold_rows,
+
+        COUNT_IF(
+            review_id IS NULL OR order_id IS NULL
+        ) AS null_business_keys,
+
+        COUNT(
+            DISTINCT review_id, order_id
+        ) AS distinct_business_keys
+
+    FROM commerceai.gold.fct_reviews
+
+),
+
+missing_source_keys AS (
+
+    SELECT COUNT(*) AS issue_count
+
+    FROM commerceai.silver.sl_reviews AS s
+
+    LEFT ANTI JOIN commerceai.gold.fct_reviews AS f
+        ON s.review_id = f.review_id
+       AND s.order_id = f.order_id
+
+),
+
+extra_gold_keys AS (
+
+    SELECT COUNT(*) AS issue_count
+
+    FROM commerceai.gold.fct_reviews AS f
+
+    LEFT ANTI JOIN commerceai.silver.sl_reviews AS s
+        ON f.review_id = s.review_id
+       AND f.order_id = s.order_id
+
+),
+
+attribute_issues AS (
+
+    SELECT
+        COUNT_IF(
+            NOT (
+                (f.review_score <=> s.review_score)
+                AND (
+                    f.review_comment_title
+                    <=> s.review_comment_title
+                )
+                AND (
+                    f.review_comment_message
+                    <=> s.review_comment_message
+                )
+                AND (
+                    f.review_creation_date
+                    <=> s.review_creation_date
+                )
+                AND (
+                    f.review_answer_timestamp
+                    <=> s.review_answer_timestamp
+                )
+            )
+        ) AS review_attribute_issues,
+
+        COUNT_IF(
+            NOT (
+                (f.customer_id <=> o.customer_id)
+                AND (f.order_status <=> o.order_status)
+                AND (
+                    f.order_purchase_timestamp
+                    <=> o.order_purchase_timestamp
+                )
+            )
+        ) AS order_context_issues,
+
+        COUNT_IF(
+            NOT (
+                (
+                    f.order_purchase_date
+                    <=> CAST(o.order_purchase_timestamp AS DATE)
+                )
+                AND (
+                    f.order_purchase_date_key
+                    <=> CAST(
+                        DATE_FORMAT(
+                            o.order_purchase_timestamp, 'yyyyMMdd'
+                        ) AS INT
+                    )
+                )
+                AND (
+                    f.review_creation_calendar_date
+                    <=> CAST(s.review_creation_date AS DATE)
+                )
+                AND (
+                    f.review_answer_calendar_date
+                    <=> CAST(s.review_answer_timestamp AS DATE)
+                )
+                AND (
+                    f.review_creation_date_key
+                    <=> CAST(
+                        DATE_FORMAT(
+                            s.review_creation_date, 'yyyyMMdd'
+                        ) AS INT
+                    )
+                )
+                AND (
+                    f.review_answer_date_key
+                    <=> CAST(
+                        DATE_FORMAT(
+                            s.review_answer_timestamp, 'yyyyMMdd'
+                        ) AS INT
+                    )
+                )
+            )
+        ) AS date_attribute_issues,
+
+        COUNT_IF(
+            NOT (
+                (
+                    f.has_review_title
+                    <=> (s.review_comment_title IS NOT NULL)
+                )
+                AND (
+                    f.has_review_message
+                    <=> (s.review_comment_message IS NOT NULL)
+                )
+            )
+        ) AS text_flag_issues
+
+    FROM commerceai.silver.sl_reviews AS s
+
+    LEFT JOIN commerceai.silver.sl_orders AS o
+        ON s.order_id = o.order_id
+
+    LEFT JOIN commerceai.gold.fct_reviews AS f
+        ON s.review_id = f.review_id
+       AND s.order_id = f.order_id
+
+),
+
+reference_issues AS (
+
+    SELECT
+        COUNT_IF(o.order_id IS NULL) AS missing_orders,
+
+        COUNT_IF(c.customer_id IS NULL) AS missing_customers,
+
+        COUNT_IF(
+            (
+                f.order_purchase_date_key IS NOT NULL
+                AND dp.date_key IS NULL
+            )
+            OR (
+                f.review_creation_date_key IS NOT NULL
+                AND dc.date_key IS NULL
+            )
+            OR (
+                f.review_answer_date_key IS NOT NULL
+                AND da.date_key IS NULL
+            )
+        ) AS missing_calendar_keys
+
+    FROM commerceai.gold.fct_reviews AS f
+
+    LEFT JOIN commerceai.gold.fct_orders AS o
+        ON f.order_id = o.order_id
+
+    LEFT JOIN commerceai.gold.dim_customer AS c
+        ON f.customer_id = c.customer_id
+
+    LEFT JOIN commerceai.gold.dim_date AS dp
+        ON f.order_purchase_date_key = dp.date_key
+
+    LEFT JOIN commerceai.gold.dim_date AS dc
+        ON f.review_creation_date_key = dc.date_key
+
+    LEFT JOIN commerceai.gold.dim_date AS da
+        ON f.review_answer_date_key = da.date_key
+
+),
+
+source_order_counts AS (
+
+    SELECT
+        order_id,
+        COUNT(*) AS review_count
+    FROM commerceai.silver.sl_reviews
+    GROUP BY order_id
+
+),
+
+gold_order_counts AS (
+
+    SELECT
+        order_id,
+        COUNT(*) AS review_count
+    FROM commerceai.gold.fct_reviews
+    GROUP BY order_id
+
+),
+
+order_multiplicity_issues AS (
+
+    SELECT
+        COUNT_IF(
+            s.order_id IS NULL
+            OR g.order_id IS NULL
+            OR NOT (
+                s.review_count <=> g.review_count
+            )
+        ) AS issue_count
+
+    FROM source_order_counts AS s
+
+    FULL OUTER JOIN gold_order_counts AS g
+        ON s.order_id = g.order_id
+
+),
+
+source_review_id_counts AS (
+
+    SELECT
+        review_id,
+        COUNT(*) AS review_count
+    FROM commerceai.silver.sl_reviews
+    GROUP BY review_id
+
+),
+
+gold_review_id_counts AS (
+
+    SELECT
+        review_id,
+        COUNT(*) AS review_count
+    FROM commerceai.gold.fct_reviews
+    GROUP BY review_id
+
+),
+
+review_id_multiplicity_issues AS (
+
+    SELECT
+        COUNT_IF(
+            s.review_id IS NULL
+            OR g.review_id IS NULL
+            OR NOT (
+                s.review_count <=> g.review_count
+            )
+        ) AS issue_count
+
+    FROM source_review_id_counts AS s
+
+    FULL OUTER JOIN gold_review_id_counts AS g
+        ON s.review_id = g.review_id
+
+),
+
+known_review_regression AS (
+
+    SELECT
+        COUNT(*) AS source_rows,
+
+        COUNT_IF(
+            f.review_id IS NOT NULL
+
+            AND (
+                f.review_comment_title
+                <=> s.review_comment_title
+            )
+
+            AND (
+                f.review_comment_message
+                <=> s.review_comment_message
+            )
+
+            AND INSTR(
+                CONCAT_WS(
+                    ' ',
+                    COALESCE(s.review_comment_title, ''),
+                    COALESCE(s.review_comment_message, '')
+                ),
+                'No "mercado livre" isso não acontece!!'
+            ) > 0
+        ) AS preserved_rows
+
+    FROM commerceai.silver.sl_reviews AS s
+
+    LEFT JOIN commerceai.gold.fct_reviews AS f
+        ON s.review_id = f.review_id
+       AND s.order_id = f.order_id
+
+    WHERE s.review_id = '5090899e38cd55729c9783745f2706f5'
+      AND s.order_id = '1b76802b72eb5517c97481ee2f7b7037'
+
+),
+
+checks AS (
+
+    SELECT
+        'row_count_matches_silver' AS check_name,
+        CAST(s.source_rows AS STRING) AS expected_value,
+        CAST(g.gold_rows AS STRING) AS observed_value,
+        IF(s.source_rows = g.gold_rows, 'PASS', 'FAIL') AS status
+
+    FROM source_stats AS s
+    CROSS JOIN gold_stats AS g
+
+    UNION ALL
+
+    SELECT
+        'review_business_key_is_not_null_and_unique',
+        '0 null keys and one unique composite key per row',
+        CONCAT(
+            'null=', CAST(null_business_keys AS STRING),
+            ', distinct=', CAST(distinct_business_keys AS STRING),
+            ', rows=', CAST(gold_rows AS STRING)
+        ),
+        IF(
+            null_business_keys = 0
+            AND distinct_business_keys = gold_rows,
+            'PASS', 'FAIL'
+        )
+    FROM gold_stats
+
+    UNION ALL
+
+    SELECT
+        'no_missing_source_review_keys',
+        '0',
+        CAST(issue_count AS STRING),
+        IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM missing_source_keys
+
+    UNION ALL
+
+    SELECT
+        'no_extra_gold_review_keys',
+        '0',
+        CAST(issue_count AS STRING),
+        IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM extra_gold_keys
+
+    UNION ALL
+
+    SELECT
+        'source_review_attributes_preserved',
+        '0',
+        CAST(review_attribute_issues AS STRING),
+        IF(review_attribute_issues = 0, 'PASS', 'FAIL')
+    FROM attribute_issues
+
+    UNION ALL
+
+    SELECT
+        'order_context_attributes_preserved',
+        '0',
+        CAST(order_context_issues AS STRING),
+        IF(order_context_issues = 0, 'PASS', 'FAIL')
+    FROM attribute_issues
+
+    UNION ALL
+
+    SELECT
+        'review_date_attributes_are_consistent',
+        '0',
+        CAST(date_attribute_issues AS STRING),
+        IF(date_attribute_issues = 0, 'PASS', 'FAIL')
+    FROM attribute_issues
+
+    UNION ALL
+
+    SELECT
+        'review_text_presence_flags_are_consistent',
+        '0',
+        CAST(text_flag_issues AS STRING),
+        IF(text_flag_issues = 0, 'PASS', 'FAIL')
+    FROM attribute_issues
+
+    UNION ALL
+
+    SELECT
+        'order_and_customer_keys_resolve',
+        '0',
+        CAST(
+            missing_orders + missing_customers AS STRING
+        ),
+        IF(
+            missing_orders = 0
+            AND missing_customers = 0,
+            'PASS', 'FAIL'
+        )
+    FROM reference_issues
+
+    UNION ALL
+
+    SELECT
+        'calendar_date_keys_resolve',
+        '0',
+        CAST(missing_calendar_keys AS STRING),
+        IF(missing_calendar_keys = 0, 'PASS', 'FAIL')
+    FROM reference_issues
+
+    UNION ALL
+
+    SELECT
+        'review_count_per_order_matches_silver',
+        '0',
+        CAST(issue_count AS STRING),
+        IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM order_multiplicity_issues
+
+    UNION ALL
+
+    SELECT
+        'review_id_multiplicity_matches_silver',
+        '0',
+        CAST(issue_count AS STRING),
+        IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM review_id_multiplicity_issues
+
+    UNION ALL
+
+    SELECT
+        'known_multiline_review_text_preserved',
+        'source=1, preserved=1',
+        CONCAT(
+            'source=', CAST(source_rows AS STRING),
+            ', preserved=', CAST(preserved_rows AS STRING)
+        ),
+        IF(
+            source_rows = 1
+            AND preserved_rows = 1,
+            'PASS', 'FAIL'
+        )
+    FROM known_review_regression
+
+)
+
+SELECT
+    check_name,
+    expected_value,
+    observed_value,
+    status
+FROM checks;
+
+
+-- COMMAND ----------
+
+-- DBTITLE 1,26 - Review Reviews Fact Validation Results
+SELECT
+    check_name,
+    expected_value,
+    observed_value,
+    status
+FROM gold_reviews_validation_results
+ORDER BY check_name;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,27 - Inspect Review Score Distribution
+SELECT
+    review_score,
+
+    COUNT(*) AS review_records,
+
+    COUNT(DISTINCT order_id) AS reviewed_orders,
+
+    COUNT_IF(has_review_title) AS reviews_with_title,
+
+    COUNT_IF(has_review_message) AS reviews_with_message,
+
+    ROUND(
+        100.0 * COUNT(*) /
+        SUM(COUNT(*)) OVER (),
+        2
+    ) AS review_share_pct
+
+FROM commerceai.gold.fct_reviews
+
+GROUP BY review_score
+
+ORDER BY review_score;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,28 - Inspect Multiple Reviews Per Order
+WITH reviews_per_order AS (
+
+    SELECT
+        order_id,
+        COUNT(*) AS review_count
+
+    FROM commerceai.gold.fct_reviews
+
+    GROUP BY order_id
+)
+
+SELECT
+    COUNT(*) AS orders_with_reviews,
+
+    SUM(review_count) AS total_reviews,
+
+    COUNT_IF(review_count > 1) AS orders_with_multiple_reviews,
+
+    MAX(review_count) AS max_reviews_per_order
+
+FROM reviews_per_order;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,29 - Enforce Reviews Fact Quality Gate
+SELECT
+    COUNT(*) AS total_checks,
+
+    COUNT_IF(status = 'PASS') AS passed_checks,
+
+    COUNT(*) - COUNT_IF(status = 'PASS') AS failed_checks,
+
+    ASSERT_TRUE(
+        COUNT(*) = 13
+        AND COUNT_IF(status = 'PASS') = 13,
+        'Gold reviews fact validation failed. Review the preceding checks.'
+    ) AS validation_gate
+
+FROM gold_reviews_validation_results;
