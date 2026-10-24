@@ -3,34 +3,28 @@
 # [tool.databricks.environment]
 # environment_version = "6"
 # ///
+
 # MAGIC %md
-# MAGIC # 08 - Gold Dimensions
+# MAGIC # 08 — Gold Dimensions
 # MAGIC
-# MAGIC **Purpose:** Build conformed Gold dimensions using Spark SQL embedded directly in Python notebook cells.
+# MAGIC **Purpose:** Build four conformed Gold dimensions using Spark SQL embedded in Python cells.
 # MAGIC
-# MAGIC **Inputs:** `commerceai.silver.sl_orders`, `commerceai.silver.sl_order_items`, `commerceai.silver.sl_reviews`, `commerceai.silver.sl_customers`, `commerceai.silver.sl_geolocation`, `commerceai.silver.sl_products`, and `commerceai.silver.sl_product_category_translation`.
+# MAGIC **Inputs:** `commerceai.silver.sl_orders`, `sl_order_items`, `sl_reviews`, `sl_customers`, `sl_geolocation`, `sl_products`, `sl_product_category_translation`, and `sl_sellers`.
 # MAGIC
-# MAGIC **Outputs:** `commerceai.gold.dim_date` (one record per calendar date), `commerceai.gold.dim_customer` (one record per `customer_id`), and `commerceai.gold.dim_product` (one record per `product_id`), `commerceai.gold.dim_sellers` (one record per `seller_id`).
+# MAGIC **Outputs:** `commerceai.gold.dim_date`, `dim_customer`, `dim_product`, and `dim_seller`.
 # MAGIC
-# MAGIC **Main Responsibilities:** Build Gold Delta dimensions with SQL embedded in `spark.sql(...)`; preserve original product attributes and missing/untranslated categories; preserve customer identities and optional geolocation. SQL is maintained directly in this notebook, without dependencies on external SQL files.
+# MAGIC **Main Responsibilities:** Preserve source entity grains, customer identity, optional ZIP-level geolocation, product category gaps, and a complete calendar. All business transformations remain in `spark.sql(...)`.
 # MAGIC
-# MAGIC **Execution/Validation Notes:** Builds use `CREATE OR REPLACE TABLE` (full rebuild). For Step 03, execute only **06 - Build Product Dimension With Embedded SQL** and **07 - Preview Product Dimension**, because the date/customer dimensions have already passed validation. Run `10_gold_validation.sql` independently to validate all three dimensions. No Silver changes, product null imputation, or product-volume feature engineering are performed here.
+# MAGIC **Execution / Validation Notes:** This notebook is a **build step**. Run in order before `09_gold_facts`; validate with `10_gold_validation` after both build notebooks. The SQL uses `CREATE OR REPLACE TABLE` and replaces each table independently. Review the session timezone before converting timestamps to dates. No previews, exploratory profiling, or independent quality gates run here.
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## 01 - Inspect Session Time Zone
-
-# COMMAND ----------
-
-# DBTITLE 1,01 - Inspect Session Time Zone
-# Record the session time zone used for timestamp-to-date conversions.
-display(spark.sql("SELECT current_timezone() AS session_time_zone"))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 02 - Build Date Dimension With Embedded SQL
+# DBTITLE 1,01 - Verify Session Time Zone
+# Keep timestamp-to-date conversion consistent with the validated UTC-session Gold baseline.
+session_timezone = spark.conf.get("spark.sql.session.timeZone")
+print(f"Spark session time zone: {session_timezone}")
+if session_timezone not in {"UTC", "Etc/UTC"}:
+    raise ValueError("Review the Spark session time zone before rebuilding Gold dimensions.")
 
 # COMMAND ----------
 
@@ -132,34 +126,7 @@ print("Gold date dimension built: commerceai.gold.dim_date")
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## 03 - Preview Date Dimension
-
-# COMMAND ----------
-
-# DBTITLE 1,03 - Preview Date Dimension
-display(spark.sql("""
-SELECT
-    date_key,
-    full_date,
-    year_number,
-    month_name,
-    iso_week_number,
-    iso_week_year,
-    is_weekend
-FROM commerceai.gold.dim_date
-ORDER BY full_date
-LIMIT 10
-"""))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 04 - Build Customer Dimension With Embedded SQL
-
-# COMMAND ----------
-
-# DBTITLE 1,04 - Build Customer Dimension With Embedded SQL
+# DBTITLE 1,03 - Build Customer Dimension With Embedded SQL
 # Grain: one record per customer_id. LEFT JOIN preserves unmatched ZIP prefixes.
 spark.sql("""
 -- CommerceAI | Gold customer dimension
@@ -203,34 +170,7 @@ print("Gold customer dimension built: commerceai.gold.dim_customer")
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## 05 - Preview Customer Dimension
-
-# COMMAND ----------
-
-# DBTITLE 1,05 - Preview Customer Dimension
-display(spark.sql("""
-SELECT
-    customer_id,
-    customer_unique_id,
-    customer_zip_code_prefix,
-    customer_state,
-    has_geolocation_match,
-    has_geolocation_coordinates,
-    geolocation_coordinate_status
-FROM commerceai.gold.dim_customer
-ORDER BY customer_id
-LIMIT 10
-"""))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 06 - Build Product Dimension With Embedded SQL
-
-# COMMAND ----------
-
-# DBTITLE 1,06 - Build Product Dimension With Embedded SQL
+# DBTITLE 1,04 - Build Product Dimension With Embedded SQL
 # Grain: one row per product_id. Preserve nullable product attributes and translation gaps.
 spark.sql("""
 -- CommerceAI | Gold product dimension
@@ -267,30 +207,7 @@ print("Gold product dimension built: commerceai.gold.dim_product")
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## 07 - Preview Product Dimension
-
-# COMMAND ----------
-
-# DBTITLE 1,07 - Preview Product Dimension
-display(spark.sql("""
-SELECT
-    product_id,
-    product_category_name,
-    product_category_name_english,
-    product_category_status,
-    product_weight_g,
-    product_length_cm,
-    product_height_cm,
-    product_width_cm
-FROM commerceai.gold.dim_product
-ORDER BY product_id
-LIMIT 10
-"""))
-
-# COMMAND ----------
-
-# DBTITLE 1,08 - Build Seller Dimension With Embedded SQL
+# DBTITLE 1,05 - Build Seller Dimension With Embedded SQL
 # Grain: one row per seller_id.
 # Preserve seller attributes and enrich with optional ZIP-level geolocation.
 
@@ -334,22 +251,3 @@ LEFT JOIN commerceai.silver.sl_geolocation AS g
 """)
 
 print("Gold seller dimension built: commerceai.gold.dim_seller")
-
-# COMMAND ----------
-
-# DBTITLE 1,09 - Preview Seller Dimension
-display(spark.sql("""
-SELECT
-    seller_id,
-    seller_zip_code_prefix,
-    seller_city,
-    seller_state,
-    reference_geolocation_city,
-    reference_geolocation_state,
-    has_geolocation_match,
-    has_geolocation_coordinates,
-    geolocation_coordinate_status
-FROM commerceai.gold.dim_seller
-ORDER BY seller_id
-LIMIT 10
-"""))
