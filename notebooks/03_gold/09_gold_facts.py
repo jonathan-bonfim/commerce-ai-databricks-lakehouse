@@ -17,6 +17,7 @@
 # MAGIC - `commerceai.gold.fct_orders`
 # MAGIC - `commerceai.gold.fct_order_items`
 # MAGIC - `commerceai.gold.fct_payments`
+# MAGIC - `commerceai.gold.fct_reviews`
 # MAGIC
 # MAGIC **Main Responsibilities:**
 # MAGIC - Preserve one row per order.
