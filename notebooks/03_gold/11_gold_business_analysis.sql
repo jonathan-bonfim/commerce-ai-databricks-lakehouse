@@ -334,3 +334,90 @@ SELECT
 FROM segment_summary
 
 ORDER BY unique_customers DESC;
+
+
+-- COMMAND ----------
+
+-- DBTITLE 1,06 - Delivery Delay and Customer Review Analysis
+
+-- Compare review scores between late and on-time deliveries.
+-- Aggregate reviews per order before joining with delivery outcomes.
+
+WITH reviews_by_order AS (
+
+    SELECT
+        order_id,
+
+        COUNT(*) AS review_count,
+
+        AVG(CAST(review_score AS DOUBLE))
+            AS avg_review_score,
+
+        MIN(review_score)
+            AS lowest_review_score
+
+    FROM commerceai.gold.fct_reviews
+
+    GROUP BY order_id
+),
+
+eligible_reviewed_orders AS (
+
+    SELECT
+        o.order_id,
+
+        o.is_late_delivery,
+        o.days_late,
+
+        r.review_count,
+        r.avg_review_score,
+        r.lowest_review_score
+
+    FROM commerceai.gold.fct_orders AS o
+
+    INNER JOIN reviews_by_order AS r
+        ON o.order_id = r.order_id
+
+    WHERE o.is_delivery_eligible = TRUE
+)
+
+SELECT
+    CASE
+        WHEN is_late_delivery = TRUE
+            THEN 'LATE'
+        ELSE 'ON_TIME'
+    END AS delivery_group,
+
+    COUNT(*) AS reviewed_orders,
+
+    SUM(review_count) AS review_records,
+
+    ROUND(
+        AVG(avg_review_score),
+        2
+    ) AS avg_review_score_per_order,
+
+    COUNT_IF(lowest_review_score <= 2)
+        AS orders_with_low_review_score,
+
+    ROUND(
+        100.0 * COUNT_IF(lowest_review_score <= 2)
+        / NULLIF(COUNT(*), 0),
+        2
+    ) AS low_review_order_rate_pct,
+
+    ROUND(
+        AVG(days_late),
+        2
+    ) AS avg_days_late
+
+FROM eligible_reviewed_orders
+
+GROUP BY
+    CASE
+        WHEN is_late_delivery = TRUE
+            THEN 'LATE'
+        ELSE 'ON_TIME'
+    END
+
+ORDER BY delivery_group;
