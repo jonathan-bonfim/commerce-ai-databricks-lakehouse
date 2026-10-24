@@ -1,21 +1,18 @@
 -- Databricks notebook source
 -- MAGIC %md
--- MAGIC # 10 - Gold Validation
+-- MAGIC # 10 — Gold Validation
 -- MAGIC
--- MAGIC **Purpose:** Validate Gold dimensions using pure Spark SQL and stop execution when a contract fails.
+-- MAGIC **Purpose:** Independently validate all eight Gold tables against their sources and analytic contracts using native Spark SQL.
 -- MAGIC
--- MAGIC **Inputs:** `commerceai.gold.dim_date`, `commerceai.gold.dim_customer`, `commerceai.gold.dim_product`, `commerceai.gold.dim_seller` and their Silver source tables.
+-- MAGIC **Inputs:** Eight `commerceai.gold` tables and the relevant `commerceai.silver` reference tables.
 -- MAGIC
--- MAGIC **Outputs:** Session-scoped validation views and visible quality-check tables; no persisted Gold validation datasets.
+-- MAGIC **Outputs:** Eight session-scoped check views, one consolidated session-scoped result view, a detailed results query, and one failing SQL quality gate. No permanent validation tables are created.
 -- MAGIC
--- MAGIC **Main Responsibilities:** Preserve seven date and nine customer validation contracts, add eight product contracts, report results, and apply SQL failure gates with `assert_true`.
+-- MAGIC **Main Responsibilities:** Preserve all **82 original validation contracts** (7 + 9 + 8 + 9 + 12 + 12 + 12 + 13), reconcile values by order, verify relationships, and detect missing or modified source records.
 -- MAGIC
--- MAGIC **Execution/Validation Notes:** Run independently after building Gold dimensions. Each `CREATE TEMP VIEW` computes checks lazily and uses the current session. `assert_true` must be evaluated in the following gate cells; a non-PASS check should fail the notebook/job. No external `.sql` files or Python cells required.
-
--- COMMAND ----------
-
--- MAGIC %md
--- MAGIC ## 01 - Prepare Date Dimension Validation Checks
+-- MAGIC **Execution / Validation Notes:** Run this independently **after** `08_gold_dimensions` and `09_gold_facts` using the same session timezone. Execute the whole notebook in order; temporary views are session-scoped and lazily evaluated. The final `ASSERT_TRUE` stops execution if any dataset is missing checks, fails a contract, or duplicates a check name. `validation_gate = NULL` denotes success. No profiling or business dashboard queries run here.
+-- MAGIC
+-- MAGIC **Baseline:** Original Gold run reported **82 PASS / 0 FAIL**. This refactored notebook must be rerun before claiming the same result for the new implementation.
 
 -- COMMAND ----------
 
@@ -116,46 +113,7 @@ FROM checks;
 
 -- COMMAND ----------
 
--- MAGIC %md
--- MAGIC ## 02 - Review Date Dimension Validation Results
-
--- COMMAND ----------
-
--- DBTITLE 1,02 - Review Date Dimension Validation Results
-SELECT
-    check_name,
-    expected_value,
-    observed_value,
-    status
-FROM gold_date_validation_results
-ORDER BY check_name;
-
--- COMMAND ----------
-
--- MAGIC %md
--- MAGIC ## 03 - Enforce Date Dimension Quality Gate
-
--- COMMAND ----------
-
--- DBTITLE 1,03 - Enforce Date Dimension Quality Gate
-SELECT
-    COUNT(*) AS total_checks,
-    COUNT_IF(status = 'PASS') AS passed_checks,
-    COUNT(*) - COUNT_IF(status = 'PASS') AS failed_checks,
-    ASSERT_TRUE(
-        COUNT(*) = 7 AND COUNT_IF(status = 'PASS') = 7,
-        'Gold date dimension validation failed. Review the preceding checks.'
-    ) AS validation_gate
-FROM gold_date_validation_results;
-
--- COMMAND ----------
-
--- MAGIC %md
--- MAGIC ## 04 - Prepare Customer Dimension Validation Checks
-
--- COMMAND ----------
-
--- DBTITLE 1,04 - Prepare Customer Dimension Validation Checks
+-- DBTITLE 1,02 - Prepare Customer Dimension Validation Checks
 CREATE OR REPLACE TEMP VIEW gold_customer_validation_results AS
 -- CommerceAI | Gold customer dimension validation
 -- Grain: one row per customer_id.
@@ -333,46 +291,7 @@ FROM checks;
 
 -- COMMAND ----------
 
--- MAGIC %md
--- MAGIC ## 05 - Review Customer Dimension Validation Results
-
--- COMMAND ----------
-
--- DBTITLE 1,05 - Review Customer Dimension Validation Results
-SELECT
-    check_name,
-    expected_value,
-    observed_value,
-    status
-FROM gold_customer_validation_results
-ORDER BY check_name;
-
--- COMMAND ----------
-
--- MAGIC %md
--- MAGIC ## 06 - Enforce Customer Dimension Quality Gate
-
--- COMMAND ----------
-
--- DBTITLE 1,06 - Enforce Customer Dimension Quality Gate
-SELECT
-    COUNT(*) AS total_checks,
-    COUNT_IF(status = 'PASS') AS passed_checks,
-    COUNT(*) - COUNT_IF(status = 'PASS') AS failed_checks,
-    ASSERT_TRUE(
-        COUNT(*) = 9 AND COUNT_IF(status = 'PASS') = 9,
-        'Gold customer dimension validation failed. Review the preceding checks.'
-    ) AS validation_gate
-FROM gold_customer_validation_results;
-
--- COMMAND ----------
-
--- MAGIC %md
--- MAGIC ## 07 - Prepare Product Dimension Validation Checks
-
--- COMMAND ----------
-
--- DBTITLE 1,07 - Prepare Product Dimension Validation Checks
+-- DBTITLE 1,03 - Prepare Product Dimension Validation Checks
 CREATE OR REPLACE TEMP VIEW gold_product_validation_results AS
 -- CommerceAI | Gold product dimension validation
 -- Grain: one row per product_id.
@@ -523,41 +442,7 @@ FROM checks;
 
 -- COMMAND ----------
 
--- MAGIC %md
--- MAGIC ## 08 - Review Product Dimension Validation Results
-
--- COMMAND ----------
-
--- DBTITLE 1,08 - Review Product Dimension Validation Results
-SELECT
-    check_name,
-    expected_value,
-    observed_value,
-    status
-FROM gold_product_validation_results
-ORDER BY check_name;
-
--- COMMAND ----------
-
--- MAGIC %md
--- MAGIC ## 09 - Enforce Product Dimension Quality Gate
-
--- COMMAND ----------
-
--- DBTITLE 1,09 - Enforce Product Dimension Quality Gate
-SELECT
-    COUNT(*) AS total_checks,
-    COUNT_IF(status = 'PASS') AS passed_checks,
-    COUNT(*) - COUNT_IF(status = 'PASS') AS failed_checks,
-    ASSERT_TRUE(
-        COUNT(*) = 8 AND COUNT_IF(status = 'PASS') = 8,
-        'Gold product dimension validation failed. Review the preceding checks.'
-    ) AS validation_gate
-FROM gold_product_validation_results;
-
--- COMMAND ----------
-
--- DBTITLE 1,10 - Prepare Seller Dimension Validation Checks
+-- DBTITLE 1,04 - Prepare Seller Dimension Validation Checks
 CREATE OR REPLACE TEMP VIEW gold_seller_validation_results AS
 
 WITH source_stats AS (
@@ -819,36 +704,7 @@ FROM checks;
 
 -- COMMAND ----------
 
--- DBTITLE 1,11 - Review Seller Dimension Validation Results
-SELECT
-    check_name,
-    expected_value,
-    observed_value,
-    status
-FROM gold_seller_validation_results
-ORDER BY check_name;
-
--- COMMAND ----------
-
--- DBTITLE 1,12 - Enforce Seller Dimension Quality Gate
-SELECT
-    COUNT(*) AS total_checks,
-
-    COUNT_IF(status = 'PASS') AS passed_checks,
-
-    COUNT(*) - COUNT_IF(status = 'PASS') AS failed_checks,
-
-    ASSERT_TRUE(
-        COUNT(*) = 9
-        AND COUNT_IF(status = 'PASS') = 9,
-        'Gold seller dimension validation failed. Review the preceding checks.'
-    ) AS validation_gate
-
-FROM gold_seller_validation_results;
-
--- COMMAND ----------
-
--- DBTITLE 1,13 - Prepare Order Fact Validation Checks
+-- DBTITLE 1,05 - Prepare Order Fact Validation Checks
 
 CREATE OR REPLACE TEMP VIEW gold_orders_validation_results AS
 
@@ -1222,81 +1078,9 @@ SELECT
     status
 FROM checks;
 
-
 -- COMMAND ----------
 
--- DBTITLE 1,14 - Review Order Fact Validation Results
-SELECT
-    check_name,
-    expected_value,
-    observed_value,
-    status
-FROM gold_orders_validation_results
-ORDER BY check_name;
-
--- COMMAND ----------
-
--- DBTITLE 1,15 - Inspect Order Fact Quality Exceptions
-SELECT
-    COUNT(*) AS total_orders,
-
-    COUNT_IF(
-        has_payments AND NOT has_order_items
-    ) AS payments_without_items,
-
-    COUNT_IF(
-        has_order_items AND NOT has_payments
-    ) AS items_without_payments,
-
-    COUNT_IF(
-        payment_item_mismatch_flag = TRUE
-    ) AS payment_item_mismatches,
-
-    COUNT_IF(
-        delivered_without_delivery_date
-    ) AS delivered_without_delivery_date,
-
-    COUNT_IF(
-        carrier_after_customer_delivery_flag = TRUE
-    ) AS carrier_after_customer_delivery,
-
-    COUNT_IF(
-        is_delivery_eligible
-    ) AS eligible_delivered_orders,
-
-    COUNT_IF(
-        is_late_delivery = TRUE
-    ) AS late_delivered_orders,
-
-    ROUND(
-        100.0 * COUNT_IF(is_late_delivery = TRUE)
-        / NULLIF(COUNT_IF(is_delivery_eligible), 0),
-        2
-    ) AS late_delivery_rate_pct
-
-FROM commerceai.gold.fct_orders;
-
--- COMMAND ----------
-
--- DBTITLE 1,16 - Enforce Order Fact Quality Gate
-SELECT
-    COUNT(*) AS total_checks,
-
-    COUNT_IF(status = 'PASS') AS passed_checks,
-
-    COUNT(*) - COUNT_IF(status = 'PASS') AS failed_checks,
-
-    ASSERT_TRUE(
-        COUNT(*) = 12
-        AND COUNT_IF(status = 'PASS') = 12,
-        'Gold order fact validation failed. Review the preceding checks.'
-    ) AS validation_gate
-
-FROM gold_orders_validation_results;
-
--- COMMAND ----------
-
--- DBTITLE 1,17 - Prepare Order Items Fact Validation Checks
+-- DBTITLE 1,06 - Prepare Order Items Fact Validation Checks
 
 CREATE OR REPLACE TEMP VIEW gold_order_items_validation_results AS
 
@@ -1654,61 +1438,9 @@ SELECT
     status
 FROM checks;
 
-
 -- COMMAND ----------
 
--- DBTITLE 1,18 - Review Order Items Fact Validation Results
-SELECT
-    check_name,
-    expected_value,
-    observed_value,
-    status
-FROM gold_order_items_validation_results
-ORDER BY check_name;
-
--- COMMAND ----------
-
--- DBTITLE 1,19 - Inspect Order Items Fact Summary
-SELECT
-    COUNT(*) AS total_order_items,
-
-    COUNT(DISTINCT order_id) AS orders_with_items,
-
-    COUNT(DISTINCT product_id) AS products_with_items,
-
-    COUNT(DISTINCT seller_id) AS sellers_with_items,
-
-    COUNT_IF(order_status = 'delivered') AS delivered_item_rows,
-
-    SUM(item_value_brl) AS total_item_value_brl,
-
-    SUM(freight_value_brl) AS total_freight_value_brl,
-
-    SUM(ordered_total_value_brl) AS total_ordered_value_brl
-
-FROM commerceai.gold.fct_order_items;
-
--- COMMAND ----------
-
--- DBTITLE 1,20 - Enforce Order Items Fact Quality Gate
-SELECT
-    COUNT(*) AS total_checks,
-
-    COUNT_IF(status = 'PASS') AS passed_checks,
-
-    COUNT(*) - COUNT_IF(status = 'PASS') AS failed_checks,
-
-    ASSERT_TRUE(
-        COUNT(*) = 12
-        AND COUNT_IF(status = 'PASS') = 12,
-        'Gold order items fact validation failed. Review the preceding checks.'
-    ) AS validation_gate
-
-FROM gold_order_items_validation_results;
-
--- COMMAND ----------
-
--- DBTITLE 1,21 - Prepare Payments Fact Validation Checks
+-- DBTITLE 1,07 - Prepare Payments Fact Validation Checks
 
 CREATE OR REPLACE TEMP VIEW gold_payments_validation_results AS
 
@@ -2051,65 +1783,9 @@ SELECT
 
 FROM checks;
 
-
 -- COMMAND ----------
 
--- DBTITLE 1,22 - Review Payments Fact Validation Results
-SELECT
-    check_name,
-    expected_value,
-    observed_value,
-    status
-FROM gold_payments_validation_results
-ORDER BY check_name;
-
--- COMMAND ----------
-
--- DBTITLE 1,23 - Inspect Payments Fact Summary
-SELECT
-    payment_type,
-
-    COUNT(*) AS payment_records,
-
-    COUNT(DISTINCT order_id) AS orders_with_payment_type,
-
-    SUM(payment_value_brl) AS paid_value_brl,
-
-    COUNT_IF(
-        is_zero_value_payment = TRUE
-    ) AS zero_value_payments,
-
-    COUNT_IF(
-        has_zero_installments = TRUE
-    ) AS zero_installment_payments
-
-FROM commerceai.gold.fct_payments
-
-GROUP BY payment_type
-
-ORDER BY payment_records DESC;
-
--- COMMAND ----------
-
--- DBTITLE 1,24 - Enforce Payments Fact Quality Gate
-SELECT
-    COUNT(*) AS total_checks,
-
-    COUNT_IF(status = 'PASS') AS passed_checks,
-
-    COUNT(*) - COUNT_IF(status = 'PASS') AS failed_checks,
-
-    ASSERT_TRUE(
-        COUNT(*) = 12
-        AND COUNT_IF(status = 'PASS') = 12,
-        'Gold payments fact validation failed. Review the preceding checks.'
-    ) AS validation_gate
-
-FROM gold_payments_validation_results;
-
--- COMMAND ----------
-
--- DBTITLE 1,25 - Prepare Reviews Fact Validation Checks
+-- DBTITLE 1,08 - Prepare Reviews Fact Validation Checks
 
 CREATE OR REPLACE TEMP VIEW gold_reviews_validation_results AS
 
@@ -2567,83 +2243,78 @@ SELECT
     status
 FROM checks;
 
-
 -- COMMAND ----------
 
--- DBTITLE 1,26 - Review Reviews Fact Validation Results
-SELECT
-    check_name,
-    expected_value,
-    observed_value,
-    status
-FROM gold_reviews_validation_results
-ORDER BY check_name;
-
--- COMMAND ----------
-
--- DBTITLE 1,27 - Inspect Review Score Distribution
-SELECT
-    review_score,
-
-    COUNT(*) AS review_records,
-
-    COUNT(DISTINCT order_id) AS reviewed_orders,
-
-    COUNT_IF(has_review_title) AS reviews_with_title,
-
-    COUNT_IF(has_review_message) AS reviews_with_message,
-
-    ROUND(
-        100.0 * COUNT(*) /
-        SUM(COUNT(*)) OVER (),
-        2
-    ) AS review_share_pct
-
-FROM commerceai.gold.fct_reviews
-
-GROUP BY review_score
-
-ORDER BY review_score;
-
--- COMMAND ----------
-
--- DBTITLE 1,28 - Inspect Multiple Reviews Per Order
-WITH reviews_per_order AS (
-
-    SELECT
-        order_id,
-        COUNT(*) AS review_count
-
-    FROM commerceai.gold.fct_reviews
-
-    GROUP BY order_id
-)
-
-SELECT
-    COUNT(*) AS orders_with_reviews,
-
-    SUM(review_count) AS total_reviews,
-
-    COUNT_IF(review_count > 1) AS orders_with_multiple_reviews,
-
-    MAX(review_count) AS max_reviews_per_order
-
-FROM reviews_per_order;
-
--- COMMAND ----------
-
--- DBTITLE 1,29 - Enforce Reviews Fact Quality Gate
-SELECT
-    COUNT(*) AS total_checks,
-
-    COUNT_IF(status = 'PASS') AS passed_checks,
-
-    COUNT(*) - COUNT_IF(status = 'PASS') AS failed_checks,
-
-    ASSERT_TRUE(
-        COUNT(*) = 13
-        AND COUNT_IF(status = 'PASS') = 13,
-        'Gold reviews fact validation failed. Review the preceding checks.'
-    ) AS validation_gate
-
+-- DBTITLE 1,09 - Consolidate Gold Validation Results
+-- Keep each original validation contract intact; add the dataset name for reporting.
+CREATE OR REPLACE TEMP VIEW gold_validation_results AS
+SELECT 'dim_date' AS dataset, check_name, expected_value, observed_value, status
+FROM gold_date_validation_results
+UNION ALL
+SELECT 'dim_customer' AS dataset, check_name, expected_value, observed_value, status
+FROM gold_customer_validation_results
+UNION ALL
+SELECT 'dim_product' AS dataset, check_name, expected_value, observed_value, status
+FROM gold_product_validation_results
+UNION ALL
+SELECT 'dim_seller' AS dataset, check_name, expected_value, observed_value, status
+FROM gold_seller_validation_results
+UNION ALL
+SELECT 'fct_orders' AS dataset, check_name, expected_value, observed_value, status
+FROM gold_orders_validation_results
+UNION ALL
+SELECT 'fct_order_items' AS dataset, check_name, expected_value, observed_value, status
+FROM gold_order_items_validation_results
+UNION ALL
+SELECT 'fct_payments' AS dataset, check_name, expected_value, observed_value, status
+FROM gold_payments_validation_results
+UNION ALL
+SELECT 'fct_reviews' AS dataset, check_name, expected_value, observed_value, status
 FROM gold_reviews_validation_results;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,10 - Review All Gold Validation Results
+SELECT dataset, check_name, expected_value, observed_value, status
+FROM gold_validation_results
+ORDER BY dataset, check_name;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,11 - Enforce Integrated Gold Quality Gate
+WITH summary AS (
+    SELECT
+        COUNT(*) AS total_checks,
+        COUNT_IF(status = 'PASS') AS passed_checks,
+        COUNT_IF(status <> 'PASS' OR status IS NULL) AS failed_checks,
+        COUNT(DISTINCT dataset, check_name) AS distinct_check_names,
+        COUNT_IF(dataset = 'dim_date') AS date_checks,
+        COUNT_IF(dataset = 'dim_customer') AS customer_checks,
+        COUNT_IF(dataset = 'dim_product') AS product_checks,
+        COUNT_IF(dataset = 'dim_seller') AS seller_checks,
+        COUNT_IF(dataset = 'fct_orders') AS order_checks,
+        COUNT_IF(dataset = 'fct_order_items') AS item_checks,
+        COUNT_IF(dataset = 'fct_payments') AS payment_checks,
+        COUNT_IF(dataset = 'fct_reviews') AS review_checks
+    FROM gold_validation_results
+)
+SELECT
+    total_checks,
+    passed_checks,
+    failed_checks,
+    ASSERT_TRUE(
+        total_checks = 82
+        AND passed_checks = 82
+        AND failed_checks = 0
+        AND distinct_check_names = 82
+        AND date_checks = 7
+        AND customer_checks = 9
+        AND product_checks = 8
+        AND seller_checks = 9
+        AND order_checks = 12
+        AND item_checks = 12
+        AND payment_checks = 12
+        AND review_checks = 13,
+        'Integrated Gold validation failed. Review all dataset checks and expected counts.'
+    ) AS validation_gate
+FROM summary;
