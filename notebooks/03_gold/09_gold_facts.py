@@ -16,6 +16,7 @@
 # MAGIC **Outputs:**
 # MAGIC - `commerceai.gold.fct_orders`
 # MAGIC - `commerceai.gold.fct_order_items`
+# MAGIC - `commerceai.gold.fct_payments`
 # MAGIC
 # MAGIC **Main Responsibilities:**
 # MAGIC - Preserve one row per order.
@@ -435,5 +436,98 @@ SELECT
     has_zero_installments
 FROM commerceai.gold.fct_payments
 ORDER BY order_id, payment_sequential
+LIMIT 10
+"""))
+
+# COMMAND ----------
+
+# DBTITLE 1,08 - Build Reviews Fact With Embedded SQL
+
+# Grain: one row per review_id and order_id.
+# Preserve review scores and original text without normalization.
+# Do not deduplicate reviews by review_id or order_id.
+
+spark.sql("""
+CREATE OR REPLACE TABLE commerceai.gold.fct_reviews
+USING DELTA
+COMMENT 'Review-level fact preserving original feedback text, review scores, timestamps and order context.'
+AS
+
+SELECT
+    -- Review business keys
+    r.review_id,
+    r.order_id,
+
+    -- Order context
+    o.customer_id,
+    o.order_status,
+    o.order_purchase_timestamp,
+
+    CAST(o.order_purchase_timestamp AS DATE)
+        AS order_purchase_date,
+
+    CAST(
+        DATE_FORMAT(o.order_purchase_timestamp, 'yyyyMMdd')
+        AS INT
+    ) AS order_purchase_date_key,
+
+    -- Original review attributes
+    r.review_score,
+    r.review_comment_title,
+    r.review_comment_message,
+    r.review_creation_date,
+    r.review_answer_timestamp,
+
+    -- Review calendar dates
+    CAST(r.review_creation_date AS DATE)
+        AS review_creation_calendar_date,
+
+    CAST(r.review_answer_timestamp AS DATE)
+        AS review_answer_calendar_date,
+
+    -- Date dimension keys
+    CAST(
+        DATE_FORMAT(r.review_creation_date, 'yyyyMMdd')
+        AS INT
+    ) AS review_creation_date_key,
+
+    CAST(
+        DATE_FORMAT(r.review_answer_timestamp, 'yyyyMMdd')
+        AS INT
+    ) AS review_answer_date_key,
+
+    -- Text presence indicators
+    (r.review_comment_title IS NOT NULL)
+        AS has_review_title,
+
+    (r.review_comment_message IS NOT NULL)
+        AS has_review_message
+
+FROM commerceai.silver.sl_reviews AS r
+
+LEFT JOIN commerceai.silver.sl_orders AS o
+    ON r.order_id = o.order_id
+""")
+
+print("Gold reviews fact built: commerceai.gold.fct_reviews")
+
+
+# COMMAND ----------
+
+# DBTITLE 1,09 - Preview Reviews Fact
+display(spark.sql("""
+SELECT
+    review_id,
+    order_id,
+    customer_id,
+    review_score,
+    review_comment_title,
+    review_comment_message,
+    review_creation_calendar_date,
+    review_answer_calendar_date,
+    has_review_title,
+    has_review_message
+FROM commerceai.gold.fct_reviews
+ORDER BY review_id, order_id
 LIMIT 10
 """))
