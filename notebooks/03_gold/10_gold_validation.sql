@@ -1,8 +1,4 @@
 -- Databricks notebook source
-
-
--- COMMAND ----------
-
 -- MAGIC %md
 -- MAGIC # 10 - Gold Validation
 -- MAGIC
@@ -1297,3 +1293,415 @@ SELECT
     ) AS validation_gate
 
 FROM gold_orders_validation_results;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,17 - Prepare Order Items Fact Validation Checks
+
+CREATE OR REPLACE TEMP VIEW gold_order_items_validation_results AS
+
+WITH source_stats AS (
+
+    SELECT COUNT(*) AS source_rows
+    FROM commerceai.silver.sl_order_items
+
+),
+
+gold_stats AS (
+
+    SELECT
+        COUNT(*) AS gold_rows,
+
+        COUNT_IF(
+            order_id IS NULL OR order_item_id IS NULL
+        ) AS null_business_keys,
+
+        COUNT(
+            DISTINCT order_id, order_item_id
+        ) AS distinct_business_keys
+
+    FROM commerceai.gold.fct_order_items
+
+),
+
+missing_source_keys AS (
+
+    SELECT COUNT(*) AS issue_count
+
+    FROM commerceai.silver.sl_order_items AS i
+
+    LEFT ANTI JOIN commerceai.gold.fct_order_items AS f
+        ON i.order_id = f.order_id
+       AND i.order_item_id = f.order_item_id
+
+),
+
+extra_gold_keys AS (
+
+    SELECT COUNT(*) AS issue_count
+
+    FROM commerceai.gold.fct_order_items AS f
+
+    LEFT ANTI JOIN commerceai.silver.sl_order_items AS i
+        ON f.order_id = i.order_id
+       AND f.order_item_id = i.order_item_id
+
+),
+
+source_attribute_issues AS (
+
+    SELECT
+        COUNT_IF(
+            NOT (
+                (f.product_id <=> i.product_id)
+                AND (f.seller_id <=> i.seller_id)
+                AND (f.shipping_limit_date <=> i.shipping_limit_date)
+                AND (f.item_value_brl <=> i.price)
+                AND (f.freight_value_brl <=> i.freight_value)
+                AND (f.customer_id <=> o.customer_id)
+                AND (f.order_status <=> o.order_status)
+                AND (
+                    f.order_purchase_timestamp
+                    <=> o.order_purchase_timestamp
+                )
+            )
+        ) AS issue_count
+
+    FROM commerceai.gold.fct_order_items AS f
+
+    LEFT JOIN commerceai.silver.sl_order_items AS i
+        ON f.order_id = i.order_id
+       AND f.order_item_id = i.order_item_id
+
+    LEFT JOIN commerceai.silver.sl_orders AS o
+        ON f.order_id = o.order_id
+
+),
+
+derived_attribute_issues AS (
+
+    SELECT
+        COUNT_IF(
+            NOT (
+                ordered_total_value_brl
+                <=> (item_value_brl + freight_value_brl)
+            )
+        ) AS amount_issues,
+
+        COUNT_IF(
+            NOT (
+                (
+                    order_purchase_date
+                    <=> CAST(order_purchase_timestamp AS DATE)
+                )
+                AND (
+                    order_purchase_date_key
+                    <=> CAST(
+                        DATE_FORMAT(
+                            order_purchase_timestamp, 'yyyyMMdd'
+                        ) AS INT
+                    )
+                )
+                AND (
+                    shipping_limit_calendar_date
+                    <=> CAST(shipping_limit_date AS DATE)
+                )
+                AND (
+                    shipping_limit_date_key
+                    <=> CAST(
+                        DATE_FORMAT(
+                            shipping_limit_date, 'yyyyMMdd'
+                        ) AS INT
+                    )
+                )
+            )
+        ) AS date_issues
+
+    FROM commerceai.gold.fct_order_items
+
+),
+
+reference_issues AS (
+
+    SELECT
+        COUNT_IF(o.order_id IS NULL) AS missing_orders,
+        COUNT_IF(c.customer_id IS NULL) AS missing_customers,
+        COUNT_IF(p.product_id IS NULL) AS missing_products,
+        COUNT_IF(s.seller_id IS NULL) AS missing_sellers,
+
+        COUNT_IF(
+            (
+                f.order_purchase_date_key IS NOT NULL
+                AND dp.date_key IS NULL
+            )
+            OR
+            (
+                f.shipping_limit_date_key IS NOT NULL
+                AND ds.date_key IS NULL
+            )
+        ) AS missing_calendar_keys
+
+    FROM commerceai.gold.fct_order_items AS f
+
+    LEFT JOIN commerceai.gold.fct_orders AS o
+        ON f.order_id = o.order_id
+
+    LEFT JOIN commerceai.gold.dim_customer AS c
+        ON f.customer_id = c.customer_id
+
+    LEFT JOIN commerceai.gold.dim_product AS p
+        ON f.product_id = p.product_id
+
+    LEFT JOIN commerceai.gold.dim_seller AS s
+        ON f.seller_id = s.seller_id
+
+    LEFT JOIN commerceai.gold.dim_date AS dp
+        ON f.order_purchase_date_key = dp.date_key
+
+    LEFT JOIN commerceai.gold.dim_date AS ds
+        ON f.shipping_limit_date_key = ds.date_key
+
+),
+
+item_aggregates AS (
+
+    SELECT
+        order_id,
+
+        COUNT(*) AS item_count,
+        COUNT(DISTINCT product_id) AS product_count,
+        COUNT(DISTINCT seller_id) AS seller_count,
+
+        SUM(item_value_brl) AS item_value,
+        SUM(freight_value_brl) AS freight_value,
+        SUM(ordered_total_value_brl) AS total_value
+
+    FROM commerceai.gold.fct_order_items
+    GROUP BY order_id
+
+),
+
+order_reconciliation AS (
+
+    SELECT
+        COUNT_IF(
+            o.order_id IS NULL
+            OR NOT (
+                (a.item_count <=> o.item_count)
+                AND (
+                    a.product_count
+                    <=> o.distinct_product_count
+                )
+                AND (
+                    a.seller_count
+                    <=> o.distinct_seller_count
+                )
+            )
+        ) AS count_issues,
+
+        COUNT_IF(
+            o.order_id IS NULL
+            OR NOT (
+                (a.item_value <=> o.item_value_brl)
+                AND (
+                    a.freight_value
+                    <=> o.freight_value_brl
+                )
+                AND (
+                    a.total_value
+                    <=> o.ordered_total_value_brl
+                )
+            )
+        ) AS amount_issues
+
+    FROM item_aggregates AS a
+
+    LEFT JOIN commerceai.gold.fct_orders AS o
+        ON a.order_id = o.order_id
+
+),
+
+checks AS (
+
+    SELECT
+        'row_count_matches_silver' AS check_name,
+        CAST(s.source_rows AS STRING) AS expected_value,
+        CAST(g.gold_rows AS STRING) AS observed_value,
+        IF(s.source_rows = g.gold_rows, 'PASS', 'FAIL') AS status
+
+    FROM source_stats AS s
+    CROSS JOIN gold_stats AS g
+
+    UNION ALL
+
+    SELECT
+        'item_business_key_is_not_null_and_unique',
+        '0 null keys and one unique composite key per row',
+        CONCAT(
+            'null=', CAST(null_business_keys AS STRING),
+            ', distinct=', CAST(distinct_business_keys AS STRING),
+            ', rows=', CAST(gold_rows AS STRING)
+        ),
+        IF(
+            null_business_keys = 0
+            AND distinct_business_keys = gold_rows,
+            'PASS', 'FAIL'
+        )
+    FROM gold_stats
+
+    UNION ALL
+
+    SELECT
+        'no_missing_source_item_keys',
+        '0',
+        CAST(issue_count AS STRING),
+        IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM missing_source_keys
+
+    UNION ALL
+
+    SELECT
+        'no_extra_gold_item_keys',
+        '0',
+        CAST(issue_count AS STRING),
+        IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM extra_gold_keys
+
+    UNION ALL
+
+    SELECT
+        'source_item_and_order_attributes_preserved',
+        '0',
+        CAST(issue_count AS STRING),
+        IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM source_attribute_issues
+
+    UNION ALL
+
+    SELECT
+        'item_total_value_is_consistent',
+        '0',
+        CAST(amount_issues AS STRING),
+        IF(amount_issues = 0, 'PASS', 'FAIL')
+    FROM derived_attribute_issues
+
+    UNION ALL
+
+    SELECT
+        'date_attributes_are_consistent',
+        '0',
+        CAST(date_issues AS STRING),
+        IF(date_issues = 0, 'PASS', 'FAIL')
+    FROM derived_attribute_issues
+
+    UNION ALL
+
+    SELECT
+        'order_and_customer_keys_resolve',
+        '0',
+        CAST(missing_orders + missing_customers AS STRING),
+        IF(
+            missing_orders = 0 AND missing_customers = 0,
+            'PASS', 'FAIL'
+        )
+    FROM reference_issues
+
+    UNION ALL
+
+    SELECT
+        'product_and_seller_keys_resolve',
+        '0',
+        CAST(missing_products + missing_sellers AS STRING),
+        IF(
+            missing_products = 0 AND missing_sellers = 0,
+            'PASS', 'FAIL'
+        )
+    FROM reference_issues
+
+    UNION ALL
+
+    SELECT
+        'calendar_date_keys_resolve',
+        '0',
+        CAST(missing_calendar_keys AS STRING),
+        IF(missing_calendar_keys = 0, 'PASS', 'FAIL')
+    FROM reference_issues
+
+    UNION ALL
+
+    SELECT
+        'item_counts_reconcile_to_order_fact',
+        '0',
+        CAST(count_issues AS STRING),
+        IF(count_issues = 0, 'PASS', 'FAIL')
+    FROM order_reconciliation
+
+    UNION ALL
+
+    SELECT
+        'item_amounts_reconcile_to_order_fact',
+        '0',
+        CAST(amount_issues AS STRING),
+        IF(amount_issues = 0, 'PASS', 'FAIL')
+    FROM order_reconciliation
+
+)
+
+SELECT
+    check_name,
+    expected_value,
+    observed_value,
+    status
+FROM checks;
+
+
+-- COMMAND ----------
+
+-- DBTITLE 1,18 - Review Order Items Fact Validation Results
+SELECT
+    check_name,
+    expected_value,
+    observed_value,
+    status
+FROM gold_order_items_validation_results
+ORDER BY check_name;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,19 - Inspect Order Items Fact Summary
+SELECT
+    COUNT(*) AS total_order_items,
+
+    COUNT(DISTINCT order_id) AS orders_with_items,
+
+    COUNT(DISTINCT product_id) AS products_with_items,
+
+    COUNT(DISTINCT seller_id) AS sellers_with_items,
+
+    COUNT_IF(order_status = 'delivered') AS delivered_item_rows,
+
+    SUM(item_value_brl) AS total_item_value_brl,
+
+    SUM(freight_value_brl) AS total_freight_value_brl,
+
+    SUM(ordered_total_value_brl) AS total_ordered_value_brl
+
+FROM commerceai.gold.fct_order_items;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,20 - Enforce Order Items Fact Quality Gate
+SELECT
+    COUNT(*) AS total_checks,
+
+    COUNT_IF(status = 'PASS') AS passed_checks,
+
+    COUNT(*) - COUNT_IF(status = 'PASS') AS failed_checks,
+
+    ASSERT_TRUE(
+        COUNT(*) = 12
+        AND COUNT_IF(status = 'PASS') = 12,
+        'Gold order items fact validation failed. Review the preceding checks.'
+    ) AS validation_gate
+
+FROM gold_order_items_validation_results;
