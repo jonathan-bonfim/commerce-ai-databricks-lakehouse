@@ -1705,3 +1705,404 @@ SELECT
     ) AS validation_gate
 
 FROM gold_order_items_validation_results;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,21 - Prepare Payments Fact Validation Checks
+
+CREATE OR REPLACE TEMP VIEW gold_payments_validation_results AS
+
+WITH source_stats AS (
+
+    SELECT COUNT(*) AS source_rows
+    FROM commerceai.silver.sl_payments
+
+),
+
+gold_stats AS (
+
+    SELECT
+        COUNT(*) AS gold_rows,
+
+        COUNT_IF(
+            order_id IS NULL
+            OR payment_sequential IS NULL
+        ) AS null_business_keys,
+
+        COUNT(
+            DISTINCT order_id, payment_sequential
+        ) AS distinct_business_keys
+
+    FROM commerceai.gold.fct_payments
+
+),
+
+missing_source_keys AS (
+
+    SELECT COUNT(*) AS issue_count
+
+    FROM commerceai.silver.sl_payments AS s
+
+    LEFT ANTI JOIN commerceai.gold.fct_payments AS f
+        ON s.order_id = f.order_id
+       AND s.payment_sequential = f.payment_sequential
+
+),
+
+extra_gold_keys AS (
+
+    SELECT COUNT(*) AS issue_count
+
+    FROM commerceai.gold.fct_payments AS f
+
+    LEFT ANTI JOIN commerceai.silver.sl_payments AS s
+        ON f.order_id = s.order_id
+       AND f.payment_sequential = s.payment_sequential
+
+),
+
+expected_payments AS (
+
+    SELECT
+        p.order_id,
+        p.payment_sequential,
+        p.payment_type,
+        p.payment_installments,
+        p.payment_value,
+
+        o.customer_id,
+        o.order_status,
+        o.order_purchase_timestamp
+
+    FROM commerceai.silver.sl_payments AS p
+
+    LEFT JOIN commerceai.silver.sl_orders AS o
+        ON p.order_id = o.order_id
+
+),
+
+attribute_issues AS (
+
+    SELECT
+        COUNT_IF(
+            NOT (
+                (f.payment_type <=> s.payment_type)
+                AND (
+                    f.payment_installments
+                    <=> s.payment_installments
+                )
+                AND (
+                    f.payment_value_brl
+                    <=> s.payment_value
+                )
+            )
+        ) AS payment_attribute_issues,
+
+        COUNT_IF(
+            NOT (
+                (f.customer_id <=> s.customer_id)
+                AND (f.order_status <=> s.order_status)
+                AND (
+                    f.order_purchase_timestamp
+                    <=> s.order_purchase_timestamp
+                )
+            )
+        ) AS order_context_issues,
+
+        COUNT_IF(
+            NOT (
+                f.is_zero_value_payment
+                <=> (
+                    s.payment_value =
+                    CAST(0.00 AS DECIMAL(18, 2))
+                )
+            )
+        ) AS zero_value_flag_issues,
+
+        COUNT_IF(
+            NOT (
+                f.has_zero_installments
+                <=> (s.payment_installments = 0)
+            )
+        ) AS zero_installment_flag_issues,
+
+        COUNT_IF(
+            NOT (
+                (
+                    f.order_purchase_date
+                    <=> CAST(s.order_purchase_timestamp AS DATE)
+                )
+                AND (
+                    f.order_purchase_date_key
+                    <=> CAST(
+                        DATE_FORMAT(
+                            s.order_purchase_timestamp,
+                            'yyyyMMdd'
+                        ) AS INT
+                    )
+                )
+            )
+        ) AS date_attribute_issues
+
+    FROM expected_payments AS s
+
+    LEFT JOIN commerceai.gold.fct_payments AS f
+        ON s.order_id = f.order_id
+       AND s.payment_sequential = f.payment_sequential
+
+),
+
+reference_issues AS (
+
+    SELECT
+        COUNT_IF(o.order_id IS NULL) AS missing_orders,
+
+        COUNT_IF(c.customer_id IS NULL) AS missing_customers,
+
+        COUNT_IF(
+            f.order_purchase_date_key IS NOT NULL
+            AND d.date_key IS NULL
+        ) AS missing_calendar_keys
+
+    FROM commerceai.gold.fct_payments AS f
+
+    LEFT JOIN commerceai.gold.fct_orders AS o
+        ON f.order_id = o.order_id
+
+    LEFT JOIN commerceai.gold.dim_customer AS c
+        ON f.customer_id = c.customer_id
+
+    LEFT JOIN commerceai.gold.dim_date AS d
+        ON f.order_purchase_date_key = d.date_key
+
+),
+
+payment_aggregates AS (
+
+    SELECT
+        order_id,
+        COUNT(*) AS payment_count,
+        SUM(payment_value_brl) AS paid_value
+
+    FROM commerceai.gold.fct_payments
+
+    GROUP BY order_id
+
+),
+
+order_reconciliation AS (
+
+    SELECT
+        COUNT_IF(
+            NOT (
+                (
+                    o.has_payments
+                    <=> (p.order_id IS NOT NULL)
+                )
+                AND (
+                    o.payment_count
+                    <=> COALESCE(p.payment_count, 0)
+                )
+                AND (
+                    o.paid_value_brl
+                    <=> p.paid_value
+                )
+            )
+        ) AS issue_count
+
+    FROM commerceai.gold.fct_orders AS o
+
+    LEFT JOIN payment_aggregates AS p
+        ON o.order_id = p.order_id
+
+),
+
+checks AS (
+
+    SELECT
+        'row_count_matches_silver' AS check_name,
+        CAST(s.source_rows AS STRING) AS expected_value,
+        CAST(g.gold_rows AS STRING) AS observed_value,
+        IF(s.source_rows = g.gold_rows, 'PASS', 'FAIL') AS status
+
+    FROM source_stats AS s
+    CROSS JOIN gold_stats AS g
+
+    UNION ALL
+
+    SELECT
+        'payment_business_key_is_not_null_and_unique',
+        '0 null keys and one unique composite key per row',
+        CONCAT(
+            'null=', CAST(null_business_keys AS STRING),
+            ', distinct=', CAST(distinct_business_keys AS STRING),
+            ', rows=', CAST(gold_rows AS STRING)
+        ),
+        IF(
+            null_business_keys = 0
+            AND distinct_business_keys = gold_rows,
+            'PASS', 'FAIL'
+        )
+    FROM gold_stats
+
+    UNION ALL
+
+    SELECT
+        'no_missing_source_payment_keys',
+        '0',
+        CAST(issue_count AS STRING),
+        IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM missing_source_keys
+
+    UNION ALL
+
+    SELECT
+        'no_extra_gold_payment_keys',
+        '0',
+        CAST(issue_count AS STRING),
+        IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM extra_gold_keys
+
+    UNION ALL
+
+    SELECT
+        'source_payment_attributes_preserved',
+        '0',
+        CAST(payment_attribute_issues AS STRING),
+        IF(payment_attribute_issues = 0, 'PASS', 'FAIL')
+    FROM attribute_issues
+
+    UNION ALL
+
+    SELECT
+        'order_context_attributes_preserved',
+        '0',
+        CAST(order_context_issues AS STRING),
+        IF(order_context_issues = 0, 'PASS', 'FAIL')
+    FROM attribute_issues
+
+    UNION ALL
+
+    SELECT
+        'zero_value_payment_flag_is_consistent',
+        '0',
+        CAST(zero_value_flag_issues AS STRING),
+        IF(zero_value_flag_issues = 0, 'PASS', 'FAIL')
+    FROM attribute_issues
+
+    UNION ALL
+
+    SELECT
+        'zero_installment_flag_is_consistent',
+        '0',
+        CAST(zero_installment_flag_issues AS STRING),
+        IF(zero_installment_flag_issues = 0, 'PASS', 'FAIL')
+    FROM attribute_issues
+
+    UNION ALL
+
+    SELECT
+        'purchase_date_attributes_are_consistent',
+        '0',
+        CAST(date_attribute_issues AS STRING),
+        IF(date_attribute_issues = 0, 'PASS', 'FAIL')
+    FROM attribute_issues
+
+    UNION ALL
+
+    SELECT
+        'order_and_customer_keys_resolve',
+        '0',
+        CAST(
+            missing_orders + missing_customers AS STRING
+        ),
+        IF(
+            missing_orders = 0
+            AND missing_customers = 0,
+            'PASS', 'FAIL'
+        )
+    FROM reference_issues
+
+    UNION ALL
+
+    SELECT
+        'calendar_date_keys_resolve',
+        '0',
+        CAST(missing_calendar_keys AS STRING),
+        IF(missing_calendar_keys = 0, 'PASS', 'FAIL')
+    FROM reference_issues
+
+    UNION ALL
+
+    SELECT
+        'payment_aggregates_reconcile_to_order_fact',
+        '0',
+        CAST(issue_count AS STRING),
+        IF(issue_count = 0, 'PASS', 'FAIL')
+    FROM order_reconciliation
+
+)
+
+SELECT
+    check_name,
+    expected_value,
+    observed_value,
+    status
+
+FROM checks;
+
+
+-- COMMAND ----------
+
+-- DBTITLE 1,22 - Review Payments Fact Validation Results
+SELECT
+    check_name,
+    expected_value,
+    observed_value,
+    status
+FROM gold_payments_validation_results
+ORDER BY check_name;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,23 - Inspect Payments Fact Summary
+SELECT
+    payment_type,
+
+    COUNT(*) AS payment_records,
+
+    COUNT(DISTINCT order_id) AS orders_with_payment_type,
+
+    SUM(payment_value_brl) AS paid_value_brl,
+
+    COUNT_IF(
+        is_zero_value_payment = TRUE
+    ) AS zero_value_payments,
+
+    COUNT_IF(
+        has_zero_installments = TRUE
+    ) AS zero_installment_payments
+
+FROM commerceai.gold.fct_payments
+
+GROUP BY payment_type
+
+ORDER BY payment_records DESC;
+
+-- COMMAND ----------
+
+-- DBTITLE 1,24 - Enforce Payments Fact Quality Gate
+SELECT
+    COUNT(*) AS total_checks,
+
+    COUNT_IF(status = 'PASS') AS passed_checks,
+
+    COUNT(*) - COUNT_IF(status = 'PASS') AS failed_checks,
+
+    ASSERT_TRUE(
+        COUNT(*) = 12
+        AND COUNT_IF(status = 'PASS') = 12,
+        'Gold payments fact validation failed. Review the preceding checks.'
+    ) AS validation_gate
+
+FROM gold_payments_validation_results;
