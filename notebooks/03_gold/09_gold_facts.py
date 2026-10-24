@@ -362,3 +362,78 @@ FROM commerceai.gold.fct_order_items
 ORDER BY order_id, order_item_id
 LIMIT 10
 """))
+
+# COMMAND ----------
+
+# DBTITLE 1,06 - Build Payments Fact With Embedded SQL
+
+# Grain: one row per order_id and payment_sequential.
+# Preserve payment records, methods, installments and exact amounts.
+# The order purchase date is contextual, not an actual payment timestamp.
+
+spark.sql("""
+CREATE OR REPLACE TABLE commerceai.gold.fct_payments
+USING DELTA
+COMMENT 'Payment-level fact preserving payment methods, installments, exact amounts and order context.'
+AS
+
+SELECT
+    -- Payment business keys
+    p.order_id,
+    p.payment_sequential,
+
+    -- Order context and dimensional relationships
+    o.customer_id,
+    o.order_status,
+    o.order_purchase_timestamp,
+
+    CAST(o.order_purchase_timestamp AS DATE)
+        AS order_purchase_date,
+
+    CAST(
+        DATE_FORMAT(o.order_purchase_timestamp, 'yyyyMMdd')
+        AS INT
+    ) AS order_purchase_date_key,
+
+    -- Original payment attributes
+    p.payment_type,
+    p.payment_installments,
+    p.payment_value AS payment_value_brl,
+
+    -- Payment quality indicators
+    (
+        p.payment_value = CAST(0.00 AS DECIMAL(18, 2))
+    ) AS is_zero_value_payment,
+
+    (
+        p.payment_installments = 0
+    ) AS has_zero_installments
+
+FROM commerceai.silver.sl_payments AS p
+
+LEFT JOIN commerceai.silver.sl_orders AS o
+    ON p.order_id = o.order_id
+""")
+
+print("Gold payments fact built: commerceai.gold.fct_payments")
+
+
+# COMMAND ----------
+
+# DBTITLE 1,07 - Preview Payments Fact
+display(spark.sql("""
+SELECT
+    order_id,
+    payment_sequential,
+    customer_id,
+    order_status,
+    order_purchase_date,
+    payment_type,
+    payment_installments,
+    payment_value_brl,
+    is_zero_value_payment,
+    has_zero_installments
+FROM commerceai.gold.fct_payments
+ORDER BY order_id, payment_sequential
+LIMIT 10
+"""))
