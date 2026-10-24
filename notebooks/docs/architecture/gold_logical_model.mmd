@@ -1,0 +1,67 @@
+%% CommerceAI Gold logical analytics model
+%% Conceptual relationships only; not proof of deployed Unity Catalog foreign keys or Power BI relationships.
+erDiagram
+    DIM_DATE ||--o{ FCT_ORDERS : purchase_date_key
+    DIM_DATE ||--o{ FCT_ORDER_ITEMS : purchase_date_key
+    DIM_DATE ||--o{ FCT_PAYMENTS : purchase_date_key
+    DIM_DATE ||--o{ FCT_REVIEWS : purchase_date_key
+
+    DIM_CUSTOMER ||--o{ FCT_ORDERS : customer_id
+    DIM_CUSTOMER ||--o{ FCT_ORDER_ITEMS : customer_id
+    DIM_CUSTOMER ||--o{ FCT_PAYMENTS : customer_id
+    DIM_CUSTOMER ||--o{ FCT_REVIEWS : customer_id
+
+    DIM_PRODUCT ||--o{ FCT_ORDER_ITEMS : product_id
+    DIM_SELLER ||--o{ FCT_ORDER_ITEMS : seller_id
+
+    DIM_DATE {
+      int date_key PK
+      date full_date
+    }
+    DIM_CUSTOMER {
+      string customer_id PK
+      string customer_unique_id
+      string customer_state
+      string customer_zip_code_prefix
+    }
+    DIM_PRODUCT {
+      string product_id PK
+      string product_category_name
+      string product_category_status
+    }
+    DIM_SELLER {
+      string seller_id PK
+      string seller_state
+      string seller_zip_code_prefix
+    }
+    FCT_ORDERS {
+      string order_id PK
+      string customer_id FK
+      int order_purchase_date_key FK
+      decimal ordered_total_value_brl
+      decimal paid_value_brl
+      boolean is_late_delivery
+    }
+    FCT_ORDER_ITEMS {
+      string order_id PK
+      int order_item_id PK
+      string customer_id FK
+      string product_id FK
+      string seller_id FK
+      decimal item_value_brl
+      decimal freight_value_brl
+    }
+    FCT_PAYMENTS {
+      string order_id PK
+      int payment_sequential PK
+      string customer_id FK
+      string payment_type
+      decimal payment_value_brl
+    }
+    FCT_REVIEWS {
+      string review_id PK
+      string order_id PK
+      string customer_id FK
+      int review_score
+      string review_comment_message
+    }
