@@ -181,3 +181,74 @@ GROUP BY
 ORDER BY delivered_item_value_brl DESC
 
 LIMIT 15;
+
+
+-- COMMAND ----------
+
+-- DBTITLE 1,04 - Seller Performance Ranking
+
+-- Rank sellers by item value from delivered orders.
+-- Aggregate at seller grain before applying the ranking window.
+
+WITH seller_performance AS (
+
+    SELECT
+        i.seller_id,
+        s.seller_state,
+
+        COUNT(*) AS delivered_item_rows,
+
+        COUNT(DISTINCT i.order_id)
+            AS delivered_orders_with_seller,
+
+        SUM(i.item_value_brl)
+            AS delivered_item_value_brl,
+
+        SUM(i.freight_value_brl)
+            AS delivered_freight_value_brl
+
+    FROM commerceai.gold.fct_order_items AS i
+
+    INNER JOIN commerceai.gold.dim_seller AS s
+        ON i.seller_id = s.seller_id
+
+    WHERE i.order_status = 'delivered'
+
+    GROUP BY
+        i.seller_id,
+        s.seller_state
+),
+
+ranked_sellers AS (
+
+    SELECT
+        seller_id,
+        seller_state,
+        delivered_item_rows,
+        delivered_orders_with_seller,
+        delivered_item_value_brl,
+        delivered_freight_value_brl,
+
+        ROW_NUMBER() OVER (
+            ORDER BY
+                delivered_item_value_brl DESC,
+                seller_id
+        ) AS seller_rank
+
+    FROM seller_performance
+)
+
+SELECT
+    seller_rank,
+    seller_id,
+    seller_state,
+    delivered_item_rows,
+    delivered_orders_with_seller,
+    delivered_item_value_brl,
+    delivered_freight_value_brl
+
+FROM ranked_sellers
+
+WHERE seller_rank <= 15
+
+ORDER BY seller_rank;
