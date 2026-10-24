@@ -252,3 +252,85 @@ FROM ranked_sellers
 WHERE seller_rank <= 15
 
 ORDER BY seller_rank;
+
+
+-- COMMAND ----------
+
+-- DBTITLE 1,05 - Customer Repeat Order Segmentation
+
+-- Identify repeat customers using customer_unique_id.
+-- Repeat behavior is defined as two or more delivered orders.
+
+WITH customer_order_history AS (
+
+    SELECT
+        c.customer_unique_id,
+
+        COUNT(*) AS delivered_order_count,
+
+        MIN(o.order_purchase_date)
+            AS first_delivered_order_purchase_date,
+
+        MAX(o.order_purchase_date)
+            AS last_delivered_order_purchase_date
+
+    FROM commerceai.gold.fct_orders AS o
+
+    INNER JOIN commerceai.gold.dim_customer AS c
+        ON o.customer_id = c.customer_id
+
+    WHERE o.order_status = 'delivered'
+
+    GROUP BY c.customer_unique_id
+),
+
+customer_segments AS (
+
+    SELECT
+        customer_unique_id,
+        delivered_order_count,
+
+        CASE
+            WHEN delivered_order_count >= 2
+                THEN 'REPEAT_CUSTOMER'
+            ELSE 'ONE_DELIVERED_ORDER'
+        END AS customer_segment
+
+    FROM customer_order_history
+),
+
+segment_summary AS (
+
+    SELECT
+        customer_segment,
+
+        COUNT(*) AS unique_customers,
+
+        SUM(delivered_order_count)
+            AS delivered_orders,
+
+        ROUND(
+            AVG(delivered_order_count),
+            2
+        ) AS avg_delivered_orders_per_customer
+
+    FROM customer_segments
+
+    GROUP BY customer_segment
+)
+
+SELECT
+    customer_segment,
+    unique_customers,
+    delivered_orders,
+    avg_delivered_orders_per_customer,
+
+    ROUND(
+        100.0 * unique_customers
+        / SUM(unique_customers) OVER (),
+        2
+    ) AS customer_share_pct
+
+FROM segment_summary
+
+ORDER BY unique_customers DESC;
