@@ -536,3 +536,99 @@ SELECT
     ) AS early_only_repeat_buyers
 
 FROM repeat_flags;
+
+
+-- COMMAND ----------
+
+-- DBTITLE 1,10 - Validate Return Target by Month and Order Outcome
+
+WITH first_orders AS (
+
+    SELECT
+        customer_unique_id,
+        as_of_timestamp,
+        first_order_final_status
+
+    FROM vw_ml_repeat_purchase_cohorts
+
+    WHERE observation_scenario = 'AUG_2018_SENSITIVITY'
+),
+
+customer_outcomes AS (
+
+    SELECT
+        f.customer_unique_id,
+        f.as_of_timestamp,
+        f.first_order_final_status,
+
+        MAX(
+            CASE
+                WHEN e.order_id IS NOT NULL
+                THEN 1 ELSE 0
+            END
+        ) AS repeat_after_24h_90d,
+
+        MAX(
+            CASE
+                WHEN e.order_status = 'delivered'
+                THEN 1 ELSE 0
+            END
+        ) AS delivered_repeat_after_24h_90d
+
+    FROM first_orders AS f
+
+    LEFT JOIN vw_ml_repeat_purchase_order_events AS e
+        ON f.customer_unique_id = e.customer_unique_id
+
+       AND e.order_purchase_timestamp >
+           f.as_of_timestamp + INTERVAL 1 DAY
+
+       AND e.order_purchase_timestamp <=
+           f.as_of_timestamp + INTERVAL 90 DAYS
+
+    GROUP BY
+        f.customer_unique_id,
+        f.as_of_timestamp,
+        f.first_order_final_status
+)
+
+SELECT
+    DATE_FORMAT(
+        as_of_timestamp,
+        'yyyy-MM'
+    ) AS first_purchase_month,
+
+    COUNT(*) AS eligible_consumers,
+
+    SUM(repeat_after_24h_90d)
+        AS return_positives_24h_to_90d,
+
+    ROUND(
+        AVG(repeat_after_24h_90d) * 100,
+        2
+    ) AS return_rate_pct,
+
+    SUM(delivered_repeat_after_24h_90d)
+        AS delivered_return_positives,
+
+    SUM(
+        CASE
+            WHEN repeat_after_24h_90d = 1
+             AND delivered_repeat_after_24h_90d = 0
+            THEN 1 ELSE 0
+        END
+    ) AS returned_without_delivered_order,
+
+    COUNT_IF(
+        first_order_final_status <> 'delivered'
+    ) AS first_orders_not_delivered
+
+FROM customer_outcomes
+
+GROUP BY
+    DATE_FORMAT(
+        as_of_timestamp,
+        'yyyy-MM'
+    )
+
+ORDER BY first_purchase_month;
