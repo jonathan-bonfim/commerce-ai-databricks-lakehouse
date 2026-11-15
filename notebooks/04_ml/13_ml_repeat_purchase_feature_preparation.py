@@ -222,3 +222,75 @@ validation = ml_dataset.agg(
 )
 
 display(validation)
+
+
+# COMMAND ----------
+
+# DBTITLE 1,04 - Create Leakage-Aware Temporal Splits
+
+from pyspark.sql import functions as F
+
+# Define temporal boundaries
+train_end = "2017-10-01 00:00:00"
+
+validation_start = "2018-01-01 00:00:00"
+validation_end = "2018-02-01 00:00:00"
+
+test_start = "2018-05-02 00:00:00"
+test_end = "2018-06-01 00:00:00"
+
+# Assign each consumer to a temporal partition
+split_dataset = (
+    ml_dataset
+    .withColumn(
+        "dataset_split",
+        F.when(
+            F.col("as_of_timestamp")
+            < F.lit(train_end).cast("timestamp"),
+            F.lit("TRAIN")
+        )
+        .when(
+            (
+                F.col("as_of_timestamp")
+                >= F.lit(validation_start).cast("timestamp")
+            )
+            &
+            (
+                F.col("as_of_timestamp")
+                < F.lit(validation_end).cast("timestamp")
+            ),
+            F.lit("VALIDATION")
+        )
+        .when(
+            (
+                F.col("as_of_timestamp")
+                >= F.lit(test_start).cast("timestamp")
+            )
+            &
+            (
+                F.col("as_of_timestamp")
+                < F.lit(test_end).cast("timestamp")
+            ),
+            F.lit("TEST")
+        )
+        .otherwise(F.lit("EXCLUDED"))
+    )
+)
+
+# Keep only the selected experiment cohorts
+experiment_dataset = split_dataset.filter(
+    F.col("dataset_split") != "EXCLUDED"
+)
+
+# Create separate DataFrames
+train_df = experiment_dataset.filter(
+    F.col("dataset_split") == "TRAIN"
+)
+
+validation_df = experiment_dataset.filter(
+    F.col("dataset_split") == "VALIDATION"
+)
+
+test_df = experiment_dataset.filter(
+    F.col("dataset_split") == "TEST"
+)
