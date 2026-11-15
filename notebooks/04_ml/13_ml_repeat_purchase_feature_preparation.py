@@ -294,3 +294,88 @@ validation_df = experiment_dataset.filter(
 test_df = experiment_dataset.filter(
     F.col("dataset_split") == "TEST"
 )
+
+
+# COMMAND ----------
+
+# DBTITLE 1,05 - Validate Temporal Splits and Label Maturity
+
+# Summarize temporal partitions
+split_summary = (
+    experiment_dataset
+    .groupBy("dataset_split")
+    .agg(
+        F.count("*").alias("consumers"),
+
+        F.countDistinct(
+            "customer_unique_id"
+        ).alias("distinct_consumers"),
+
+        F.sum(
+            "repeat_after_24h_90d_label"
+        ).alias("positive_labels"),
+
+        F.count("*").__sub__(
+            F.sum("repeat_after_24h_90d_label")
+        ).alias("negative_labels"),
+
+        F.round(
+            F.avg("repeat_after_24h_90d_label") * 100,
+            2
+        ).alias("positive_rate_pct"),
+
+        F.min("as_of_timestamp").alias(
+            "min_prediction_timestamp"
+        ),
+
+        F.max("as_of_timestamp").alias(
+            "max_prediction_timestamp"
+        ),
+
+        F.max(
+            F.expr(
+                "as_of_timestamp + INTERVAL 90 DAYS"
+            )
+        ).alias("latest_label_maturity")
+    )
+)
+
+display(
+    split_summary.orderBy(
+        F.when(F.col("dataset_split") == "TRAIN", 1)
+         .when(F.col("dataset_split") == "VALIDATION", 2)
+         .otherwise(3)
+    )
+)
+
+# Check unique consumer identity across retained splits
+integrity = experiment_dataset.agg(
+    F.count("*").alias("total_rows"),
+
+    F.countDistinct(
+        "customer_unique_id"
+    ).alias("unique_consumers")
+).first()
+
+assert (
+    integrity["total_rows"]
+    == integrity["unique_consumers"]
+), "Duplicate consumer identities found."
+
+# Ensure earlier labels mature before the next phase begins
+boundaries = {
+    row["dataset_split"]: row
+    for row in split_summary.collect()
+}
+
+assert (
+    boundaries["TRAIN"]["latest_label_maturity"]
+    < boundaries["VALIDATION"]["min_prediction_timestamp"]
+), "Training labels are not fully mature before validation."
+
+assert (
+    boundaries["VALIDATION"]["latest_label_maturity"]
+    < boundaries["TEST"]["min_prediction_timestamp"]
+), "Validation labels are not fully mature before testing."
+
+print("Temporal split and label maturity checks: PASS")
