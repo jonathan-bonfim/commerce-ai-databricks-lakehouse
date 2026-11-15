@@ -850,3 +850,125 @@ GROUP BY
 ORDER BY
     feature_name,
     feature_bucket;
+
+
+-- COMMAND ----------
+
+-- DBTITLE 1,13 - Assess Geographic and Weekday Features
+
+WITH first_orders AS (
+
+    SELECT
+        customer_unique_id,
+        as_of_timestamp,
+        first_order_customer_state
+
+    FROM vw_ml_repeat_purchase_cohorts
+
+    WHERE observation_scenario = 'AUG_2018_SENSITIVITY'
+
+      AND as_of_timestamp >=
+          TIMESTAMP('2017-01-01 00:00:00')
+
+      AND as_of_timestamp <
+          TIMESTAMP('2018-06-01 00:00:00')
+),
+
+labeled_customers AS (
+
+    SELECT
+        f.customer_unique_id,
+        f.first_order_customer_state,
+
+        DAYOFWEEK(
+            f.as_of_timestamp
+        ) AS purchase_weekday,
+
+        MAX(
+            CASE
+                WHEN e.order_id IS NOT NULL
+                THEN 1 ELSE 0
+            END
+        ) AS repeat_after_24h_90d_label
+
+    FROM first_orders AS f
+
+    LEFT JOIN vw_ml_repeat_purchase_order_events AS e
+        ON f.customer_unique_id = e.customer_unique_id
+
+       AND e.order_purchase_timestamp >
+           f.as_of_timestamp + INTERVAL 1 DAY
+
+       AND e.order_purchase_timestamp <=
+           f.as_of_timestamp + INTERVAL 90 DAYS
+
+    GROUP BY
+        f.customer_unique_id,
+        f.first_order_customer_state,
+        DAYOFWEEK(f.as_of_timestamp)
+),
+
+feature_segments AS (
+
+    SELECT
+        'CUSTOMER_STATE' AS feature_name,
+
+        COALESCE(
+            first_order_customer_state,
+            'UNKNOWN'
+        ) AS feature_bucket,
+
+        repeat_after_24h_90d_label
+
+    FROM labeled_customers
+
+    UNION ALL
+
+    SELECT
+        'PURCHASE_WEEKDAY' AS feature_name,
+
+        CASE purchase_weekday
+            WHEN 1 THEN '01 - Sunday'
+            WHEN 2 THEN '02 - Monday'
+            WHEN 3 THEN '03 - Tuesday'
+            WHEN 4 THEN '04 - Wednesday'
+            WHEN 5 THEN '05 - Thursday'
+            WHEN 6 THEN '06 - Friday'
+            WHEN 7 THEN '07 - Saturday'
+        END AS feature_bucket,
+
+        repeat_after_24h_90d_label
+
+    FROM labeled_customers
+)
+
+SELECT
+    feature_name,
+    feature_bucket,
+
+    COUNT(*) AS consumers,
+
+    SUM(repeat_after_24h_90d_label)
+        AS repeat_buyers,
+
+    ROUND(
+        AVG(repeat_after_24h_90d_label) * 100,
+        2
+    ) AS repeat_rate_pct,
+
+    CASE
+        WHEN COUNT(*) < 500
+          OR SUM(repeat_after_24h_90d_label) < 20
+        THEN 'LOW_SUPPORT'
+        ELSE 'SUFFICIENT_FOR_INITIAL_REVIEW'
+    END AS segment_support
+
+FROM feature_segments
+
+GROUP BY
+    feature_name,
+    feature_bucket
+
+ORDER BY
+    feature_name,
+    consumers DESC;
