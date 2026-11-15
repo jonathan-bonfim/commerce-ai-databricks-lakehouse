@@ -341,3 +341,86 @@ WHERE example_rank <= 3
 ORDER BY
     repeat_order_90d_label DESC,
     example_rank;
+
+
+-- COMMAND ----------
+
+-- DBTITLE 1,08 - Analyze Time to Second Purchase
+
+WITH first_orders AS (
+
+    SELECT
+        customer_unique_id,
+        as_of_timestamp
+
+    FROM vw_ml_repeat_purchase_cohorts
+
+    WHERE observation_scenario = 'AUG_2018_SENSITIVITY'
+      AND repeat_order_90d_label = 1
+),
+
+second_purchases AS (
+
+    SELECT
+        f.customer_unique_id,
+        f.as_of_timestamp,
+
+        MIN(
+            e.order_purchase_timestamp
+        ) AS second_purchase_timestamp
+
+    FROM first_orders AS f
+
+    INNER JOIN vw_ml_repeat_purchase_order_events AS e
+        ON f.customer_unique_id = e.customer_unique_id
+
+       AND e.order_purchase_timestamp > f.as_of_timestamp
+
+       AND e.order_purchase_timestamp <=
+           f.as_of_timestamp + INTERVAL 90 DAYS
+
+    GROUP BY
+        f.customer_unique_id,
+        f.as_of_timestamp
+)
+
+SELECT
+    COUNT(*) AS repeat_buyers_90d,
+
+    COUNT_IF(
+        second_purchase_timestamp <=
+        as_of_timestamp + INTERVAL 1 HOUR
+    ) AS repeat_within_1_hour,
+
+    COUNT_IF(
+        second_purchase_timestamp <=
+        as_of_timestamp + INTERVAL 1 DAY
+    ) AS repeat_within_1_day,
+
+    COUNT_IF(
+        second_purchase_timestamp <=
+        as_of_timestamp + INTERVAL 7 DAYS
+    ) AS repeat_within_7_days,
+
+    COUNT_IF(
+        second_purchase_timestamp <=
+        as_of_timestamp + INTERVAL 30 DAYS
+    ) AS repeat_within_30_days,
+
+    COUNT_IF(
+        second_purchase_timestamp >
+        as_of_timestamp + INTERVAL 30 DAYS
+    ) AS repeat_after_30_days,
+
+    ROUND(
+        PERCENTILE_APPROX(
+            (
+                UNIX_TIMESTAMP(second_purchase_timestamp)
+                - UNIX_TIMESTAMP(as_of_timestamp)
+            ) / 86400.0,
+            0.5
+        ),
+        2
+    ) AS median_days_to_second_purchase
+
+FROM second_purchases;
