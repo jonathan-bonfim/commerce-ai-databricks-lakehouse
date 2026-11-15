@@ -1,0 +1,122 @@
+-- Databricks notebook source
+-- MAGIC %md
+-- MAGIC
+-- MAGIC # Customer Repeat Purchase — Feature Preparation
+-- MAGIC
+-- MAGIC ## Purpose
+-- MAGIC Prepare a customer-level supervised dataset to predict repeat orders occurring more than 24 hours and up to 90 days after the first observed order.
+-- MAGIC
+-- MAGIC ## Inputs
+-- MAGIC - `commerceai.gold.fct_orders`
+-- MAGIC - `commerceai.gold.dim_customer`
+-- MAGIC
+-- MAGIC ## Outputs
+-- MAGIC - Customer-level first-order snapshots
+-- MAGIC - Preliminary feature DataFrame
+-- MAGIC - Binary repeat purchase target
+-- MAGIC - Dataset integrity checks
+-- MAGIC
+-- MAGIC ## Main Responsibilities
+-- MAGIC 1. Identify the first observed order per consumer.
+-- MAGIC 2. Apply the approved observation cohort.
+-- MAGIC 3. Extract candidate features available at prediction time.
+-- MAGIC 4. Generate the 24-hour to 90-day repeat purchase label.
+-- MAGIC 5. Validate row counts, class balance, and missing values.
+-- MAGIC
+-- MAGIC ## Execution / Validation Notes
+-- MAGIC - Use PySpark DataFrames.
+-- MAGIC - Preserve the existing Bronze, Silver, and Gold tables.
+-- MAGIC - Do not create persistent ML tables yet.
+-- MAGIC - Do not train any models.
+-- MAGIC - Do not use future outcomes as predictive features.
+-- MAGIC - Treat final Gold item counts and order values as an at-purchase availability assumption requiring documentation.
+-- MAGIC - Use the current session timestamp semantics without arbitrary timezone conversions.
+-- MAGIC
+
+-- COMMAND ----------
+
+-- DBTITLE 1,01 - Build First Observed Order Snapshots
+-- MAGIC %python
+-- MAGIC
+-- MAGIC from pyspark.sql import functions as F
+-- MAGIC from pyspark.sql.window import Window
+-- MAGIC
+-- MAGIC # Load validated Gold sources
+-- MAGIC orders = spark.table(
+-- MAGIC     "commerceai.gold.fct_orders"
+-- MAGIC ).select(
+-- MAGIC     "order_id",
+-- MAGIC     "customer_id",
+-- MAGIC     "order_purchase_timestamp",
+-- MAGIC     "item_count",
+-- MAGIC     "ordered_total_value_brl"
+-- MAGIC )
+-- MAGIC
+-- MAGIC customers = spark.table(
+-- MAGIC     "commerceai.gold.dim_customer"
+-- MAGIC ).select(
+-- MAGIC     "customer_id",
+-- MAGIC     "customer_unique_id",
+-- MAGIC     "customer_state"
+-- MAGIC )
+-- MAGIC
+-- MAGIC # Resolve consumer identity
+-- MAGIC order_events = (
+-- MAGIC     orders
+-- MAGIC     .join(customers, on="customer_id", how="inner")
+-- MAGIC     .filter(
+-- MAGIC         F.col("customer_unique_id").isNotNull()
+-- MAGIC         & F.col("order_purchase_timestamp").isNotNull()
+-- MAGIC     )
+-- MAGIC )
+-- MAGIC
+-- MAGIC # Rank all observed orders before filtering cohorts
+-- MAGIC customer_window = (
+-- MAGIC     Window
+-- MAGIC     .partitionBy("customer_unique_id")
+-- MAGIC     .orderBy(
+-- MAGIC         F.col("order_purchase_timestamp").asc(),
+-- MAGIC         F.col("order_id").asc()
+-- MAGIC     )
+-- MAGIC )
+-- MAGIC
+-- MAGIC first_orders = (
+-- MAGIC     order_events
+-- MAGIC     .withColumn(
+-- MAGIC         "order_rank",
+-- MAGIC         F.row_number().over(customer_window)
+-- MAGIC     )
+-- MAGIC     .filter(F.col("order_rank") == 1)
+-- MAGIC     .filter(
+-- MAGIC         (F.col("order_purchase_timestamp") >=
+-- MAGIC          F.lit("2017-01-01").cast("timestamp"))
+-- MAGIC         &
+-- MAGIC         (F.col("order_purchase_timestamp") <
+-- MAGIC          F.lit("2018-06-01").cast("timestamp"))
+-- MAGIC     )
+-- MAGIC     .select(
+-- MAGIC         "customer_unique_id",
+-- MAGIC         F.col("order_id").alias("first_order_id"),
+-- MAGIC         F.col("order_purchase_timestamp").alias(
+-- MAGIC             "as_of_timestamp"
+-- MAGIC         ),
+-- MAGIC         F.col("customer_state").alias(
+-- MAGIC             "first_order_customer_state"
+-- MAGIC         ),
+-- MAGIC         F.col("item_count").alias(
+-- MAGIC             "first_order_item_count"
+-- MAGIC         ),
+-- MAGIC         F.col("ordered_total_value_brl").alias(
+-- MAGIC             "first_order_value_brl"
+-- MAGIC         ),
+-- MAGIC         F.dayofweek(
+-- MAGIC             "order_purchase_timestamp"
+-- MAGIC         ).alias("purchase_weekday"),
+-- MAGIC         F.month(
+-- MAGIC             "order_purchase_timestamp"
+-- MAGIC         ).alias("purchase_month")
+-- MAGIC     )
+-- MAGIC )
+-- MAGIC
+-- MAGIC display(first_orders.limit(10))
+-- MAGIC
