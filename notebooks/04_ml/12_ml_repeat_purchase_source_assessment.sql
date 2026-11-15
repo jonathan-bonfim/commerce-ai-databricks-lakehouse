@@ -424,3 +424,115 @@ SELECT
     ) AS median_days_to_second_purchase
 
 FROM second_purchases;
+
+
+-- COMMAND ----------
+
+-- DBTITLE 1,09 - Compare Repeat Purchase Target Definitions
+
+WITH first_orders AS (
+
+    SELECT
+        customer_unique_id,
+        as_of_timestamp
+
+    FROM vw_ml_repeat_purchase_cohorts
+
+    WHERE observation_scenario = 'AUG_2018_SENSITIVITY'
+),
+
+repeat_flags AS (
+
+    SELECT
+        f.customer_unique_id,
+
+        MAX(
+            CASE
+                WHEN e.order_id IS NOT NULL
+                THEN 1 ELSE 0
+            END
+        ) AS repeat_any_90d,
+
+        MAX(
+            CASE
+                WHEN e.order_purchase_timestamp >
+                     f.as_of_timestamp + INTERVAL 1 HOUR
+                THEN 1 ELSE 0
+            END
+        ) AS repeat_after_1h_90d,
+
+        MAX(
+            CASE
+                WHEN e.order_purchase_timestamp >
+                     f.as_of_timestamp + INTERVAL 1 DAY
+                THEN 1 ELSE 0
+            END
+        ) AS repeat_after_24h_90d,
+
+        MAX(
+            CASE
+                WHEN e.order_purchase_timestamp >
+                     f.as_of_timestamp + INTERVAL 7 DAYS
+                THEN 1 ELSE 0
+            END
+        ) AS repeat_after_7d_90d,
+
+        MAX(
+            CASE
+                WHEN e.order_purchase_timestamp <=
+                     f.as_of_timestamp + INTERVAL 1 DAY
+                THEN 1 ELSE 0
+            END
+        ) AS has_early_repeat_24h
+
+    FROM first_orders AS f
+
+    LEFT JOIN vw_ml_repeat_purchase_order_events AS e
+        ON f.customer_unique_id = e.customer_unique_id
+
+       AND e.order_purchase_timestamp > f.as_of_timestamp
+
+       AND e.order_purchase_timestamp <=
+           f.as_of_timestamp + INTERVAL 90 DAYS
+
+    GROUP BY f.customer_unique_id
+)
+
+SELECT
+    COUNT(*) AS eligible_consumers,
+
+    SUM(repeat_any_90d) AS repeat_any_90d,
+
+    SUM(repeat_after_1h_90d) AS repeat_after_1h_90d,
+
+    SUM(repeat_after_24h_90d) AS repeat_after_24h_90d,
+
+    SUM(repeat_after_7d_90d) AS repeat_after_7d_90d,
+
+    ROUND(
+        AVG(repeat_after_24h_90d) * 100,
+        2
+    ) AS repeat_after_24h_rate_pct,
+
+    ROUND(
+        AVG(repeat_after_7d_90d) * 100,
+        2
+    ) AS repeat_after_7d_rate_pct,
+
+    SUM(
+        CASE
+            WHEN has_early_repeat_24h = 1
+             AND repeat_after_24h_90d = 1
+            THEN 1 ELSE 0
+        END
+    ) AS early_and_later_repeat_buyers,
+
+    SUM(
+        CASE
+            WHEN has_early_repeat_24h = 1
+             AND repeat_after_24h_90d = 0
+            THEN 1 ELSE 0
+        END
+    ) AS early_only_repeat_buyers
+
+FROM repeat_flags;
