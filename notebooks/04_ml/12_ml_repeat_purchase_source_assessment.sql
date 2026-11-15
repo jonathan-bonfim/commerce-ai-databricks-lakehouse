@@ -722,3 +722,131 @@ FROM labeled_customers
 GROUP BY repeat_after_24h_90d_label
 
 ORDER BY repeat_after_24h_90d_label;
+
+
+-- COMMAND ----------
+
+-- DBTITLE 1,12 - Analyze Return Rates by Initial Purchase Features
+
+WITH first_orders AS (
+
+    SELECT
+        customer_unique_id,
+        as_of_timestamp,
+        first_order_item_count,
+        first_order_value_brl
+
+    FROM vw_ml_repeat_purchase_cohorts
+
+    WHERE observation_scenario = 'AUG_2018_SENSITIVITY'
+
+      AND as_of_timestamp >=
+          TIMESTAMP('2017-01-01 00:00:00')
+
+      AND as_of_timestamp <
+          TIMESTAMP('2018-06-01 00:00:00')
+),
+
+labeled_customers AS (
+
+    SELECT
+        f.customer_unique_id,
+        f.first_order_item_count,
+        f.first_order_value_brl,
+
+        MAX(
+            CASE
+                WHEN e.order_id IS NOT NULL
+                THEN 1 ELSE 0
+            END
+        ) AS repeat_after_24h_90d_label
+
+    FROM first_orders AS f
+
+    LEFT JOIN vw_ml_repeat_purchase_order_events AS e
+        ON f.customer_unique_id = e.customer_unique_id
+
+       AND e.order_purchase_timestamp >
+           f.as_of_timestamp + INTERVAL 1 DAY
+
+       AND e.order_purchase_timestamp <=
+           f.as_of_timestamp + INTERVAL 90 DAYS
+
+    GROUP BY
+        f.customer_unique_id,
+        f.first_order_item_count,
+        f.first_order_value_brl
+),
+
+feature_segments AS (
+
+    SELECT
+        'ITEM_COUNT' AS feature_name,
+
+        CASE
+            WHEN first_order_item_count IS NULL
+              OR first_order_item_count = 0
+                THEN '00 - Missing or zero'
+
+            WHEN first_order_item_count = 1
+                THEN '01 - One item'
+
+            WHEN first_order_item_count = 2
+                THEN '02 - Two items'
+
+            ELSE '03 - Three or more'
+        END AS feature_bucket,
+
+        repeat_after_24h_90d_label
+
+    FROM labeled_customers
+
+    UNION ALL
+
+    SELECT
+        'ORDER_VALUE_BRL' AS feature_name,
+
+        CASE
+            WHEN first_order_value_brl IS NULL
+                THEN '00 - Missing'
+
+            WHEN first_order_value_brl < 100
+                THEN '01 - Below 100'
+
+            WHEN first_order_value_brl < 200
+                THEN '02 - 100 to 199.99'
+
+            WHEN first_order_value_brl < 500
+                THEN '03 - 200 to 499.99'
+
+            ELSE '04 - 500 or more'
+        END AS feature_bucket,
+
+        repeat_after_24h_90d_label
+
+    FROM labeled_customers
+)
+
+SELECT
+    feature_name,
+    feature_bucket,
+
+    COUNT(*) AS consumers,
+
+    SUM(repeat_after_24h_90d_label)
+        AS repeat_buyers,
+
+    ROUND(
+        AVG(repeat_after_24h_90d_label) * 100,
+        2
+    ) AS repeat_rate_pct
+
+FROM feature_segments
+
+GROUP BY
+    feature_name,
+    feature_bucket
+
+ORDER BY
+    feature_name,
+    feature_bucket;
