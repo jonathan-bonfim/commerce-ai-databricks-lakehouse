@@ -632,3 +632,93 @@ GROUP BY
     )
 
 ORDER BY first_purchase_month;
+
+
+-- COMMAND ----------
+
+-- DBTITLE 1,11 - Assess Initial Feature Candidates by Target
+
+WITH first_orders AS (
+
+    SELECT
+        customer_unique_id,
+        as_of_timestamp,
+        first_order_customer_state,
+        first_order_item_count,
+        first_order_value_brl
+
+    FROM vw_ml_repeat_purchase_cohorts
+
+    WHERE observation_scenario = 'AUG_2018_SENSITIVITY'
+
+      AND as_of_timestamp >= TIMESTAMP('2017-01-01 00:00:00')
+
+      AND as_of_timestamp < TIMESTAMP('2018-06-01 00:00:00')
+),
+
+labeled_customers AS (
+
+    SELECT
+        f.customer_unique_id,
+        f.first_order_customer_state,
+        f.first_order_item_count,
+        f.first_order_value_brl,
+
+        MAX(
+            CASE
+                WHEN e.order_id IS NOT NULL
+                THEN 1 ELSE 0
+            END
+        ) AS repeat_after_24h_90d_label
+
+    FROM first_orders AS f
+
+    LEFT JOIN vw_ml_repeat_purchase_order_events AS e
+        ON f.customer_unique_id = e.customer_unique_id
+
+       AND e.order_purchase_timestamp >
+           f.as_of_timestamp + INTERVAL 1 DAY
+
+       AND e.order_purchase_timestamp <=
+           f.as_of_timestamp + INTERVAL 90 DAYS
+
+    GROUP BY
+        f.customer_unique_id,
+        f.first_order_customer_state,
+        f.first_order_item_count,
+        f.first_order_value_brl
+)
+
+SELECT
+    repeat_after_24h_90d_label,
+
+    COUNT(*) AS consumers,
+
+    COUNT_IF(
+        first_order_customer_state IS NULL
+    ) AS missing_customer_state,
+
+    COUNT_IF(
+        first_order_item_count IS NULL
+        OR first_order_item_count = 0
+    ) AS missing_or_zero_item_count,
+
+    COUNT_IF(
+        first_order_value_brl IS NULL
+    ) AS missing_first_order_value,
+
+    ROUND(
+        AVG(first_order_item_count),
+        2
+    ) AS avg_first_order_item_count,
+
+    ROUND(
+        AVG(first_order_value_brl),
+        2
+    ) AS avg_first_order_value_brl
+
+FROM labeled_customers
+
+GROUP BY repeat_after_24h_90d_label
+
+ORDER BY repeat_after_24h_90d_label;
