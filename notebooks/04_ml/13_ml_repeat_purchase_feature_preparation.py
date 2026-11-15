@@ -181,3 +181,44 @@ display(
         "repeat_after_24h_90d_label"
     ).limit(10)
 )
+
+
+# COMMAND ----------
+
+# DBTITLE 1,03 - Validate Feature Dataset Integrity
+
+validation = ml_dataset.agg(
+    F.count("*").alias("total_consumers"),
+
+    F.countDistinct(
+        "customer_unique_id"
+    ).alias("distinct_consumers"),
+
+    F.sum(
+        "repeat_after_24h_90d_label"
+    ).alias("positive_labels"),
+
+    F.sum(
+        F.when(
+            F.col("repeat_after_24h_90d_label") == 0,
+            1
+        ).otherwise(0)
+    ).alias("negative_labels"),
+
+    F.sum(
+        F.when(
+            F.col("first_order_value_brl").isNull(),
+            1
+        ).otherwise(0)
+    ).alias("missing_order_values"),
+
+    F.sum(
+        F.when(
+            F.col("first_order_item_count").isNull()
+            | (F.col("first_order_item_count") == 0),
+            1
+        ).otherwise(0)
+    ).alias("missing_or_zero_item_counts")
+)
+
+display(validation)
